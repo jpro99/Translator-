@@ -96,4 +96,21 @@ export function isEnglish(text) {
   return hasLatin && !hasCJK && !hasArabic && !hasCyrillic && !hasHebrew && !hasThai && !hasDevan && !hasGreek;
 }
 
+export const ENGLISH = {
+  key: 'en', name: 'English', native: 'English', flag: '🇺🇸',
+  speechCode: 'en-US', apiCode: 'en', isMine: isEnglish,
+};
+
+/** Guess language from transcript text (for labeling listen-mode lines). */
+export function detectLanguageFromText(text) {
+  if (!text?.trim()) return null;
+  if (isEnglish(text)) return ENGLISH;
+  for (const lang of LANGUAGE_LIST) {
+    if (!lang.isMine(text)) continue;
+    if (lang.key === 'ja' && !/[ぁ-ん]/.test(text) && !/[一-鿿]/.test(text)) continue;
+    return lang;
+  }
+  return { key: '?', name: 'Speech', native: '?', flag: '🌐', speechCode: 'en-US', apiCode: 'en' };
+}
+
 export { OFFLINE_STEPS };
