@@ -145,7 +145,37 @@ body {
   color: var(--text);
 }
 
+.line-arrow {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--label);
+  margin: 8px 0 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.line-trans {
+  font-size: 1.125rem;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--text2);
+}
+
+.line-trans.is-pending,
+.chat-trans.is-pending {
+  color: var(--label);
+  font-weight: 400;
+  font-style: italic;
+}
+
 .line-interim { opacity: 0.55; border: 1px dashed var(--sep); box-shadow: none; }
+
+.action-row {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+  margin-bottom: 4px;
+}
 
 .chat {
   background: var(--card);

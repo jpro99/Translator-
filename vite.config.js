@@ -28,6 +28,14 @@ export default defineConfig({
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
         runtimeCaching: [
           {
+            urlPattern: /^https:\/\/translate\.googleapis\.com\/.*/i,
+            handler: 'StaleWhileRevalidate',
+            options: {
+              cacheName: 'gtx-cache',
+              expiration: { maxEntries: 500, maxAgeSeconds: 3600 },
+            },
+          },
+          {
             urlPattern: /^https:\/\/api\.mymemory\.translated\.net\/.*/i,
             handler: 'StaleWhileRevalidate',
             options: {
