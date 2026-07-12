@@ -239,13 +239,22 @@ export default function App() {
   }, [remember, isRecentDupe]);
 
   const runListenLoop = useCallback(async (lang) => {
-    setListenStatus(`Listening · ${lang.name}`);
+    setListenStatus(`On · ${lang.name} — speak anytime`);
     listenLangRef.current = lang;
     setListenLang(lang);
 
     await keepListening({
       activeRef: listenActiveRef,
       getLang: () => listenLangRef.current?.speechCode || lang.speechCode,
+      onPhase: (phase) => {
+        if (!listenActiveRef.current) return;
+        const name = listenLangRef.current?.name || lang.name;
+        setListenStatus(
+          phase === 'hearing'
+            ? `Hearing · ${name}`
+            : `On · ${name} — speak anytime`,
+        );
+      },
       onInterim: (t) => {
         if (listenActiveRef.current) setListenInterim(t || '');
       },
@@ -260,7 +269,6 @@ export default function App() {
         if (useLang.key !== current.key && useLang.speechCode) {
           listenLangRef.current = useLang;
           setListenLang(useLang);
-          setListenStatus(`Listening · ${useLang.name}`);
         }
         void addListenLine(text, useLang.key === 'en' ? ENGLISH : useLang);
       },
@@ -333,7 +341,7 @@ export default function App() {
     setListenLang(lang);
 
     if (listenActiveRef.current) {
-      setListenStatus(`Listening · ${lang.name}`);
+      setListenStatus(`On · ${lang.name} — speak anytime`);
       restartMic();
       return;
     }
@@ -383,8 +391,8 @@ export default function App() {
       void addConverseMessage('you', text, 'en', lang.apiCode, lang.speechCode);
       converseFocusRef.current = 'them';
       setConverseFocus('them');
-      setConverseStatus(`Listening · ${lang.name}`);
-      restartMic(); // switch recognizer language, stay in continuous mode
+      setConverseStatus(`On · ${lang.name} — speak anytime`);
+      restartMic(); // next speech uses their language
       return;
     }
 
@@ -398,13 +406,13 @@ export default function App() {
       void addConverseMessage('them', text, lang.apiCode, 'en', ENGLISH.speechCode);
       converseFocusRef.current = 'you';
       setConverseFocus('you');
-      setConverseStatus('Listening · English');
+      setConverseStatus('On · English — speak anytime');
       restartMic();
     }
   }, [addConverseMessage]);
 
   const runConversationLoop = useCallback(async () => {
-    setConverseStatus(`Listening · ${languageRef.current.name}`);
+    setConverseStatus(`On · ${languageRef.current.name} — speak anytime`);
 
     await keepListening({
       activeRef: converseActiveRef,
@@ -413,6 +421,16 @@ export default function App() {
           ? ENGLISH.speechCode
           : (languageRef.current?.speechCode || 'en-US')
       ),
+      onPhase: (phase) => {
+        if (!converseActiveRef.current) return;
+        const focus = converseFocusRef.current;
+        const label = focus === 'you' ? 'English' : (languageRef.current?.name || '');
+        setConverseStatus(
+          phase === 'hearing'
+            ? `Hearing · ${label}`
+            : `On · ${label} — speak anytime`,
+        );
+      },
       onInterim: (t) => {
         if (converseActiveRef.current) setTurnInterim(t || '');
       },
@@ -462,8 +480,8 @@ export default function App() {
     const lang = languageRef.current;
     setConverseStatus(
       who === 'you'
-        ? 'Listening · English'
-        : `Listening · ${lang.name}`,
+        ? 'On · English — speak anytime'
+        : `On · ${lang.name} — speak anytime`,
     );
     setTurnInterim('');
     if (converseActiveRef.current) restartMic();
@@ -489,8 +507,8 @@ export default function App() {
     if (converseActiveRef.current) {
       setConverseStatus(
         converseFocusRef.current === 'you'
-          ? 'Listening · English'
-          : `Listening · ${lang.name}`,
+          ? 'On · English — speak anytime'
+          : `On · ${lang.name} — speak anytime`,
       );
       restartMic();
     }
@@ -530,8 +548,8 @@ export default function App() {
               {listenLines.length === 0 && !listenInterim && !detecting && (
                 <div className="empty">
                   <span className="empty-icon">👂</span>
-                  <p>Pick their language, then tap Start. It stays on and types as they talk.</p>
-                  <p className="empty-note">Tap Stop only when you’re finished.</p>
+                  <p>Pick their language, then tap Start. It stays ready and only picks up when someone talks.</p>
+                  <p className="empty-note">Tap Stop when you’re finished.</p>
                 </div>
               )}
 

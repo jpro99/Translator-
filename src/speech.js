@@ -1,14 +1,15 @@
 /**
- * Continuous speech recognition that stays open while you talk.
- * Final phrases stream out as Chrome finalizes them — we do NOT stop
- * the mic between phrases (that was the in/out / beep cycle).
+ * Voice-activated speech recognition (Android-friendly).
  *
- * Chrome eventually ends a session on long silence; we quietly reopen
- * with a short gap so listening feels always-on until Stop.
+ * Chrome on Android BEEPS every time SpeechRecognition.start() runs.
+ * So we keep one quiet getUserMedia stream open for voice detection,
+ * and only start SpeechRecognition when someone is actually talking.
+ * Silence → no restarts → no beep loop.
  */
 
 let gen = 0;
-let active = null; // { rec, endedResolve, ended }
+let activeRec = null; // { rec, stop }
+let media = null; // { stream, ctx, analyser }
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -17,7 +18,7 @@ function getSR() {
 }
 
 export function speechSupported() {
-  return !!getSR();
+  return !!getSR() && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
 }
 
 function clearHandlers(rec) {
@@ -31,46 +32,155 @@ function clearHandlers(rec) {
   rec.onend = null;
 }
 
-/** Soft-stop current session (language switch). Outer loop keeps running. */
-export function restartMic() {
-  const session = active;
-  if (!session) return;
-  try {
-    session.rec.stop();
-  } catch {
-    try { session.rec.abort(); } catch {
-      session.endedResolve?.();
-    }
+function stopRecognitionOnly() {
+  const cur = activeRec;
+  activeRec = null;
+  if (!cur) return;
+  clearHandlers(cur.rec);
+  try { cur.rec.stop(); } catch {
+    try { cur.rec.abort(); } catch {}
   }
 }
 
-/** Hard-stop — ends keepListening. Call from Stop / tab switch. */
+function teardownMedia() {
+  if (!media) return;
+  try { media.analyser?.disconnect(); } catch {}
+  try { media.source?.disconnect(); } catch {}
+  try { media.ctx?.close(); } catch {}
+  try {
+    media.stream?.getTracks?.().forEach((t) => t.stop());
+  } catch {}
+  media = null;
+}
+
+/** Soft restart — drop current recognition so the next speech uses a new language. */
+export function restartMic() {
+  stopRecognitionOnly();
+}
+
+/** Hard stop — ends keepListening and releases the mic. */
 export async function stopMic() {
   gen += 1;
-  const session = active;
-  if (!session) return;
+  stopRecognitionOnly();
+  teardownMedia();
+  await sleep(150);
+}
+
+function voiceLevel(analyser, buffer) {
+  analyser.getByteTimeDomainData(buffer);
+  let sum = 0;
+  for (let i = 0; i < buffer.length; i += 1) {
+    const v = (buffer[i] - 128) / 128;
+    sum += v * v;
+  }
+  return Math.sqrt(sum / buffer.length);
+}
+
+async function ensureMedia() {
+  if (media?.analyser) return media;
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+    video: false,
+  });
+
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ctx = new AC();
+  if (ctx.state === 'suspended') {
+    try { await ctx.resume(); } catch {}
+  }
+
+  const source = ctx.createMediaStreamSource(stream);
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 2048;
+  analyser.smoothingTimeConstant = 0.8;
+  source.connect(analyser);
+
+  media = { stream, ctx, source, analyser };
+  return media;
+}
+
+function startRecognition({
+  lang, myGen, activeRef, onInterim, onFinal, onError, onPhase, state,
+}) {
+  if (activeRec) return;
+  const SR = getSR();
+  if (!SR) return;
+
+  let rec;
+  try {
+    rec = new SR();
+  } catch {
+    return;
+  }
+
+  rec.lang = lang || 'en-US';
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.maxAlternatives = 1;
+
+  const session = { rec };
+  activeRec = session;
+  onPhase?.('hearing');
+
+  rec.onresult = (event) => {
+    if (myGen !== gen || !activeRef.current) return;
+
+    let interim = '';
+    for (let i = event.resultIndex; i < event.results.length; i += 1) {
+      const result = event.results[i];
+      const text = (result[0]?.transcript || '').trim();
+      if (!text) continue;
+      if (result.isFinal) {
+        Promise.resolve(onFinal?.(text)).catch(() => {});
+      } else {
+        interim = text;
+      }
+    }
+    if (interim) onInterim?.(interim);
+    else if (event.results[event.results.length - 1]?.isFinal) onInterim?.('');
+  };
+
+  rec.onerror = (event) => {
+    const err = event?.error || '';
+    if (err === 'no-speech' || err === 'aborted' || err === 'speech-timeout') return;
+    if (err === 'not-allowed') {
+      onError?.('Microphone access denied — allow it in browser settings.');
+      activeRef.current = false;
+      return;
+    }
+    if (err === 'audio-capture') {
+      onError?.('No microphone found.');
+      activeRef.current = false;
+    }
+  };
+
+  rec.onend = () => {
+    if (activeRec === session) activeRec = null;
+    clearHandlers(rec);
+    // Require a beat of quiet / fresh speech before the next start (kills beep loops)
+    state.cooldownUntil = Date.now() + 700;
+    state.voicedFor = 0;
+    onPhase?.('idle');
+  };
 
   try {
-    session.rec.stop();
+    rec.start();
   } catch {
-    try { session.rec.abort(); } catch {
-      session.endedResolve?.();
-    }
+    if (activeRec === session) activeRec = null;
+    state.cooldownUntil = Date.now() + 700;
+    onPhase?.('idle');
   }
-
-  await Promise.race([session.ended, sleep(800)]);
-  if (active === session) {
-    clearHandlers(session.rec);
-    active = null;
-    session.endedResolve?.();
-  }
-  await sleep(200);
 }
 
 /**
- * Stay listening until activeRef is false or stopMic().
- * Phrases are delivered through onFinal as they complete; interim text
- * streams through onInterim while the person is mid-sentence.
+ * Always-on listen until Stop.
+ * Mic stream stays open quietly; SpeechRecognition only runs while talking
+ * so Android doesn't beep on/off forever.
  */
 export async function keepListening({
   activeRef,
@@ -78,170 +188,94 @@ export async function keepListening({
   onInterim,
   onFinal,
   onError,
+  onPhase,
 }) {
-  const SR = getSR();
-  if (!SR) {
+  if (!speechSupported()) {
     onError?.('Use Chrome or Edge for speech recognition.');
     return;
   }
 
   const myGen = ++gen;
-  let emptyDeaths = 0;
+
+  try {
+    await ensureMedia();
+  } catch {
+    onError?.('Microphone access denied — allow it in browser settings.');
+    activeRef.current = false;
+    return;
+  }
+
+  onPhase?.('idle');
+
+  const analyser = media.analyser;
+  const buffer = new Uint8Array(analyser.fftSize);
+
+  // Tuned for phone mics in a normal room
+  const THRESHOLD = 0.04;
+  const SPEAK_MS = 200; // voice must be present this long before starting SR
+  const POLL_MS = 80;
+  const state = { cooldownUntil: 0, voicedFor: 0 };
 
   while (activeRef.current && myGen === gen) {
-    const lang = (typeof getLang === 'function' ? getLang() : getLang) || 'en-US';
-    let gotSpeech = false;
-    let startedAt = Date.now();
-
-    await new Promise((resolve) => {
-      if (!activeRef.current || myGen !== gen || active) {
-        resolve();
-        return;
-      }
-
-      let endedResolve;
-      const ended = new Promise((r) => { endedResolve = r; });
-      let settled = false;
-
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        if (active?.rec === rec) active = null;
-        clearHandlers(rec);
-        endedResolve();
-        resolve();
-      };
-
-      let rec;
-      try {
-        rec = new SR();
-      } catch {
-        resolve();
-        return;
-      }
-
-      rec.lang = lang;
-      rec.continuous = true;
-      rec.interimResults = true;
-      rec.maxAlternatives = 1;
-
-      active = { rec, endedResolve, ended };
-
-      rec.onresult = (event) => {
-        if (myGen !== gen || !activeRef.current) return;
-        gotSpeech = true;
-        emptyDeaths = 0;
-
-        let interim = '';
-        for (let i = event.resultIndex; i < event.results.length; i += 1) {
-          const result = event.results[i];
-          const text = (result[0]?.transcript || '').trim();
-          if (!text) continue;
-
-          if (result.isFinal) {
-            // Keep the session open — do NOT stop/abort here.
-            Promise.resolve(onFinal?.(text)).catch(() => {});
-          } else {
-            interim = text;
-          }
-        }
-        if (interim) onInterim?.(interim);
-        else if (event.results[event.results.length - 1]?.isFinal) {
-          // Clear interim bubble once a final lands
-          onInterim?.('');
-        }
-      };
-
-      rec.onerror = (event) => {
-        const err = event?.error || '';
-        // Silence / abort: normal. Session will end → we reopen.
-        if (err === 'no-speech' || err === 'aborted' || err === 'speech-timeout') return;
-        if (err === 'not-allowed') {
-          onError?.('Microphone access denied — allow it in browser settings.');
-          activeRef.current = false;
-          finish();
-          return;
-        }
-        if (err === 'audio-capture') {
-          onError?.('No microphone found.');
-          activeRef.current = false;
-          finish();
-          return;
-        }
-        // network etc. — let onend reopen after a pause
-      };
-
-      rec.onend = () => finish();
-
-      try {
-        rec.start();
-      } catch {
-        finish();
-      }
-    });
-
-    if (!activeRef.current || myGen !== gen) break;
-
-    // Chrome closed the session. Reopen quietly so listening never "stops".
-    const livedMs = Date.now() - startedAt;
-    if (!gotSpeech) {
-      emptyDeaths += 1;
-      // Back off if the engine is dying instantly (avoids beep storms)
-      const delay = emptyDeaths >= 3 ? 2000 : emptyDeaths >= 2 ? 1000 : 450;
-      await sleep(delay);
-    } else if (livedMs < 800) {
-      await sleep(600);
-    } else {
-      // Normal end after speech/silence — reopen fast
-      await sleep(280);
+    if (media?.ctx?.state === 'suspended') {
+      try { await media.ctx.resume(); } catch {}
     }
+
+    const level = voiceLevel(analyser, buffer);
+    const speaking = level >= THRESHOLD;
+
+    if (speaking) state.voicedFor += POLL_MS;
+    else state.voicedFor = 0;
+
+    const lang = (typeof getLang === 'function' ? getLang() : getLang) || 'en-US';
+    const canStart = !activeRec
+      && Date.now() >= state.cooldownUntil
+      && state.voicedFor >= SPEAK_MS;
+
+    if (canStart) {
+      startRecognition({
+        lang,
+        myGen,
+        activeRef,
+        onInterim,
+        onFinal,
+        onError,
+        onPhase,
+        state,
+      });
+      state.voicedFor = 0;
+    }
+
+    await sleep(POLL_MS);
+  }
+
+  if (myGen === gen) {
+    stopRecognitionOnly();
+    teardownMedia();
   }
 }
 
 export const listenLoop = keepListening;
 
-/** Single-utterance helper (language probe / rare one-shots). */
+/** Rare one-shot (not used for main Listen/Talk loops). */
 export async function listenOnce({ lang, onInterim, timeoutMs = 12000 } = {}) {
-  if (!speechSupported()) return null;
-  if (active) {
-    restartMic();
-    await sleep(300);
-  }
-
+  if (!getSR()) return null;
   return new Promise((resolve) => {
     const SR = getSR();
-    if (!SR) {
-      resolve(null);
-      return;
-    }
-
     let settled = false;
-    let endedResolve;
-    const ended = new Promise((r) => { endedResolve = r; });
-    let rec;
+    const rec = new SR();
+    rec.lang = lang || 'en-US';
+    rec.continuous = false;
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
 
     const finish = (text) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (active?.rec === rec) active = null;
       clearHandlers(rec);
-      endedResolve();
       resolve(text);
     };
-
-    try {
-      rec = new SR();
-    } catch {
-      resolve(null);
-      return;
-    }
-
-    rec.lang = lang || 'en-US';
-    rec.continuous = false;
-    rec.interimResults = true;
-    rec.maxAlternatives = 1;
-    active = { rec, endedResolve, ended };
 
     const timer = setTimeout(() => {
       try { rec.stop(); } catch { finish(null); }
@@ -261,43 +295,9 @@ export async function listenOnce({ lang, onInterim, timeoutMs = 12000 } = {}) {
       }
       if (interim) onInterim?.(interim);
     };
-
-    rec.onerror = (event) => {
-      if (event.error === 'aborted' || event.error === 'no-speech') return;
-      finish(null);
-    };
-
+    rec.onerror = () => {};
     rec.onend = () => { if (!settled) finish(null); };
 
-    try {
-      rec.start();
-    } catch {
-      finish(null);
-    }
+    try { rec.start(); } catch { finish(null); }
   });
-}
-
-export function probeLanguage(lang, timeoutMs = 4000) {
-  return listenOnce({ lang: lang.speechCode, timeoutMs }).then((text) => {
-    if (!text) return null;
-    let match = lang.isMine?.(text);
-    if (lang.key === 'ja' && match) {
-      const hasHiragana = /[ぁ-ん]/.test(text);
-      const hasKanji = /[一-鿿]/.test(text);
-      if (!hasHiragana && !hasKanji) match = false;
-    }
-    return match ? { lang, text } : null;
-  });
-}
-
-export async function detectSpokenLanguage(candidates, onTrying, cancelRef) {
-  for (const lang of candidates) {
-    if (cancelRef && !cancelRef.current) return null;
-    onTrying?.(lang);
-    const hit = await probeLanguage(lang);
-    if (cancelRef && !cancelRef.current) return null;
-    if (hit) return hit.lang;
-    await sleep(500);
-  }
-  return null;
 }
