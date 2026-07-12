@@ -239,21 +239,31 @@ export default function App() {
   }, [remember, isRecentDupe]);
 
   const runListenLoop = useCallback(async (lang) => {
-    setListenStatus(`On · ${lang.name} — speak anytime`);
+    setListenStatus(`Loading speech engine… (one-time)`);
     listenLangRef.current = lang;
     setListenLang(lang);
 
     await keepListening({
       activeRef: listenActiveRef,
-      getLang: () => listenLangRef.current?.speechCode || lang.speechCode,
+      getLang: () => ({
+        speechCode: listenLangRef.current?.speechCode || lang.speechCode,
+        apiCode: listenLangRef.current?.apiCode || lang.apiCode,
+      }),
+      onModel: (info) => {
+        if (!listenActiveRef.current) return;
+        if (info.status === 'ready') {
+          setListenStatus(`On · ${listenLangRef.current?.name || lang.name} — speak anytime`);
+          return;
+        }
+        const pct = typeof info.progress === 'number' ? ` ${Math.round(info.progress)}%` : '';
+        setListenStatus(`Loading speech engine…${pct}`);
+      },
       onPhase: (phase) => {
         if (!listenActiveRef.current) return;
         const name = listenLangRef.current?.name || lang.name;
-        setListenStatus(
-          phase === 'hearing'
-            ? `Hearing · ${name}`
-            : `On · ${name} — speak anytime`,
-        );
+        if (phase === 'hearing') setListenStatus(`Hearing · ${name}`);
+        else if (phase === 'transcribing') setListenStatus(`Transcribing · ${name}`);
+        else setListenStatus(`On · ${name} — speak anytime`);
       },
       onInterim: (t) => {
         if (listenActiveRef.current) setListenInterim(t || '');
@@ -300,7 +310,7 @@ export default function App() {
 
   const toggleListen = useCallback(async () => {
     if (!speechSupported()) {
-      setMicError('Use Chrome or Edge for speech recognition.');
+      setMicError('Microphone access is required. Allow it when prompted.');
       return;
     }
     if (listening || detecting) {
@@ -412,24 +422,39 @@ export default function App() {
   }, [addConverseMessage]);
 
   const runConversationLoop = useCallback(async () => {
-    setConverseStatus(`On · ${languageRef.current.name} — speak anytime`);
+    setConverseStatus('Loading speech engine… (one-time)');
 
     await keepListening({
       activeRef: converseActiveRef,
-      getLang: () => (
-        converseFocusRef.current === 'you'
-          ? ENGLISH.speechCode
-          : (languageRef.current?.speechCode || 'en-US')
-      ),
+      getLang: () => {
+        if (converseFocusRef.current === 'you') {
+          return { speechCode: ENGLISH.speechCode, apiCode: 'en' };
+        }
+        const lang = languageRef.current;
+        return {
+          speechCode: lang?.speechCode || 'en-US',
+          apiCode: lang?.apiCode || 'en',
+        };
+      },
+      onModel: (info) => {
+        if (!converseActiveRef.current) return;
+        if (info.status === 'ready') {
+          const label = converseFocusRef.current === 'you'
+            ? 'English'
+            : (languageRef.current?.name || '');
+          setConverseStatus(`On · ${label} — speak anytime`);
+          return;
+        }
+        const pct = typeof info.progress === 'number' ? ` ${Math.round(info.progress)}%` : '';
+        setConverseStatus(`Loading speech engine…${pct}`);
+      },
       onPhase: (phase) => {
         if (!converseActiveRef.current) return;
         const focus = converseFocusRef.current;
         const label = focus === 'you' ? 'English' : (languageRef.current?.name || '');
-        setConverseStatus(
-          phase === 'hearing'
-            ? `Hearing · ${label}`
-            : `On · ${label} — speak anytime`,
-        );
+        if (phase === 'hearing') setConverseStatus(`Hearing · ${label}`);
+        else if (phase === 'transcribing') setConverseStatus(`Transcribing · ${label}`);
+        else setConverseStatus(`On · ${label} — speak anytime`);
       },
       onInterim: (t) => {
         if (converseActiveRef.current) setTurnInterim(t || '');
@@ -452,7 +477,7 @@ export default function App() {
 
   const toggleConverse = useCallback(async () => {
     if (!speechSupported()) {
-      setMicError('Use Chrome or Edge for speech recognition.');
+      setMicError('Microphone access is required. Allow it when prompted.');
       return;
     }
     if (conversing) {
@@ -548,8 +573,8 @@ export default function App() {
               {listenLines.length === 0 && !listenInterim && !detecting && (
                 <div className="empty">
                   <span className="empty-icon">👂</span>
-                  <p>Pick their language, then tap Start. It stays ready and only picks up when someone talks.</p>
-                  <p className="empty-note">Tap Stop when you’re finished.</p>
+                  <p>Pick their language, then tap Start. No beeps — it listens silently and types as they talk.</p>
+                  <p className="empty-note">First start may download a small speech model (one time).</p>
                 </div>
               )}
 
@@ -658,7 +683,7 @@ export default function App() {
               {messages.length === 0 && !turnInterim && (
                 <div className="empty">
                   <span className="empty-icon">💬</span>
-                  <p>Tap Start. It stays on and prints both languages as each person talks.</p>
+                  <p>Tap Start. Silent listening — no beeps — prints both languages as each person talks.</p>
                   <p className="empty-note">
                     English ↔ {language.name}. Tap You / Them to switch who the mic is set for.
                   </p>

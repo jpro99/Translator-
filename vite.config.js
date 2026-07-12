@@ -39,6 +39,39 @@ export default defineConfig({
         navigateFallback: 'index.html',
         runtimeCaching: [
           {
+            // Whisper model files from Hugging Face (cached after first download)
+            urlPattern: /^https:\/\/huggingface\.co\/.*/i,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'hf-model-cache',
+              expiration: { maxEntries: 40, maxAgeSeconds: 60 * 60 * 24 * 30 },
+            },
+          },
+          {
+            urlPattern: /^https:\/\/cdn-lfs\.huggingface\.co\/.*/i,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'hf-lfs-cache',
+              expiration: { maxEntries: 40, maxAgeSeconds: 60 * 60 * 24 * 30 },
+            },
+          },
+          {
+            urlPattern: /\.wasm$/i,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'wasm-cache',
+              expiration: { maxEntries: 10, maxAgeSeconds: 60 * 60 * 24 * 30 },
+            },
+          },
+          {
+            urlPattern: /^https:\/\/cdn\.jsdelivr\.net\/.*/i,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'jsdelivr-cache',
+              expiration: { maxEntries: 40, maxAgeSeconds: 60 * 60 * 24 * 30 },
+            },
+          },
+          {
             urlPattern: /^https:\/\/translate\.googleapis\.com\/.*/i,
             handler: 'NetworkFirst',
             options: {
@@ -69,6 +102,9 @@ export default defineConfig({
       },
     }),
   ],
+  optimizeDeps: {
+    exclude: ['@huggingface/transformers'],
+  },
   server: {
     host: true,
     port: 5173,
