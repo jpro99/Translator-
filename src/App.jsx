@@ -9,13 +9,12 @@ import {
 import {
   speechSupported,
   stopMic,
-  listenOnce,
-  listenLoop,
+  restartMic,
+  keepListening,
   detectSpokenLanguage,
-  sleep,
 } from './speech';
 
-/* ─── Translation cache ─────────────────────────────────────────────── */
+/* ─── Translation ───────────────────────────────────────────────────── */
 const _cacheInit = (() => {
   try { return JSON.parse(localStorage.getItem('tr_v1') || '[]'); } catch { return []; }
 })();
@@ -27,40 +26,74 @@ function persistCache() {
   } catch {}
 }
 
+function cleanTranslated(text) {
+  return (text || '').replace(/\s+/g, ' ').trim();
+}
+
+async function translateViaGoogle(text, from, to) {
+  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(from)}&tl=${encodeURIComponent(to)}&dt=t&q=${encodeURIComponent(text)}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`gtx ${res.status}`);
+  const data = await res.json();
+  const joined = Array.isArray(data?.[0])
+    ? data[0].filter(Boolean).map((p) => p?.[0]).join('')
+    : '';
+  return cleanTranslated(joined);
+}
+
+async function translateViaMyMemory(text, from, to) {
+  const res = await fetch(
+    `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${from}|${to}`,
+  );
+  const data = await res.json();
+  if (data.responseStatus !== 200) throw new Error('mymemory');
+  return cleanTranslated(data.responseData?.translatedText);
+}
+
+async function translateViaLingva(text, from, to) {
+  const res = await fetch(`https://lingva.ml/api/v1/${from}/${to}/${encodeURIComponent(text)}`);
+  if (!res.ok) throw new Error(`lingva ${res.status}`);
+  const data = await res.json();
+  return cleanTranslated(data.translation);
+}
+
+/**
+ * Translate with retries + auto-detect fallback.
+ * Returns the best available translation (may equal source for proper nouns).
+ */
 async function translate(text, from, to) {
-  if (!text?.trim() || from === to) return text;
-  const key = `${text}|${from}|${to}`;
+  const raw = (text || '').trim();
+  if (!raw) return null;
+  if (from === to) return raw;
+
+  const key = `${raw}|${from}|${to}`;
   if (translationCache.has(key)) return translationCache.get(key);
-  const save = (r) => { translationCache.set(key, r); persistCache(); return r; };
-  const differs = (r) => r && r.trim().toLowerCase() !== text.trim().toLowerCase();
 
-  // Google translate (unofficial, reliable for short phrases)
-  try {
-    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(from)}&tl=${encodeURIComponent(to)}&dt=t&q=${encodeURIComponent(text)}`;
-    const res = await fetch(url);
-    const data = await res.json();
-    const r = Array.isArray(data?.[0])
-      ? data[0].filter(Boolean).map((p) => p?.[0]).join('')
-      : '';
-    if (differs(r)) return save(r);
-  } catch {}
+  const save = (r) => {
+    if (!r) return null;
+    translationCache.set(key, r);
+    persistCache();
+    return r;
+  };
 
-  try {
-    const res = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${from}|${to}`);
-    const data = await res.json();
-    if (data.responseStatus === 200) {
-      const r = data.responseData.translatedText;
-      if (differs(r)) return save(r);
-    }
-  } catch {}
+  const attempts = [
+    () => translateViaGoogle(raw, from, to),
+    () => translateViaGoogle(raw, 'auto', to),
+    () => translateViaMyMemory(raw, from, to),
+    () => translateViaLingva(raw, from, to),
+  ];
 
-  try {
-    const res = await fetch(`https://lingva.ml/api/v1/${from}/${to}/${encodeURIComponent(text)}`);
-    const data = await res.json();
-    if (differs(data.translation)) return save(data.translation);
-  } catch {}
-
-  return null;
+  let lastSame = null;
+  for (const attempt of attempts) {
+    try {
+      const r = await attempt();
+      if (!r) continue;
+      // Prefer a result that actually changed; keep same-text as last resort
+      if (r.toLowerCase() !== raw.toLowerCase()) return save(r);
+      lastSame = r;
+    } catch {}
+  }
+  return lastSame ? save(lastSame) : null;
 }
 
 /* ─── Helpers ───────────────────────────────────────────────────────── */
@@ -77,10 +110,8 @@ function formatTime(d = new Date()) {
 
 function looksLikeForeign(text, lang) {
   if (!text?.trim()) return false;
-  if (isEnglish(text)) return false;
   if (UNIQUE_SCRIPT_KEYS.has(lang.key)) {
     if (!lang.isMine?.(text)) return false;
-    // Reject pure-katakana Japanese fakes
     if (lang.key === 'ja') {
       const hasHiragana = /[ぁ-ん]/.test(text);
       const hasKanji = /[一-鿿]/.test(text);
@@ -88,7 +119,7 @@ function looksLikeForeign(text, lang) {
     }
     return true;
   }
-  // Latin-script: accept non-English transcripts from that recognizer
+  // Latin-script: accept anything from that recognizer that isn't clearly English
   return !isEnglish(text);
 }
 
@@ -114,11 +145,11 @@ export default function App() {
     LANGUAGE_LIST.find((l) => l.key === 'ja') || LANGUAGE_LIST[0]
   );
   const [showLangPicker, setShowLangPicker] = useState(false);
-  const [langPickerFor, setLangPickerFor] = useState('converse'); // 'converse' | 'listen'
+  const [langPickerFor, setLangPickerFor] = useState('converse');
   const [langSearch, setLangSearch] = useState('');
   const [messages, setMessages] = useState([]);
   const [conversing, setConversing] = useState(false);
-  const [converseFocus, setConverseFocus] = useState('them'); // 'you' | 'them'
+  const [converseFocus, setConverseFocus] = useState('them');
   const [turnInterim, setTurnInterim] = useState('');
   const [converseStatus, setConverseStatus] = useState('');
   const [ttsOn, setTtsOn] = useState(false);
@@ -127,7 +158,10 @@ export default function App() {
   const converseActiveRef = useRef(false);
   const converseFocusRef = useRef('them');
   const languageRef = useRef(language);
+  const ttsOnRef = useRef(false);
   const seenRef = useRef(new Set());
+  // Short lock so we don't print the same final twice from overlapping restarts
+  const recentLockRef = useRef([]);
 
   const listEndRef = useRef(null);
   const chatEndRef = useRef(null);
@@ -135,6 +169,7 @@ export default function App() {
   useEffect(() => { languageRef.current = language; }, [language]);
   useEffect(() => { converseFocusRef.current = converseFocus; }, [converseFocus]);
   useEffect(() => { listenLangRef.current = listenLang; }, [listenLang]);
+  useEffect(() => { ttsOnRef.current = ttsOn; }, [ttsOn]);
 
   useEffect(() => {
     listEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -151,58 +186,73 @@ export default function App() {
     stopMic();
   }, []);
 
+  const isRecentDupe = useCallback((text) => {
+    const n = norm(text);
+    if (!n) return true;
+    const now = Date.now();
+    recentLockRef.current = recentLockRef.current.filter((u) => now - u.t < 8000);
+    if (recentLockRef.current.some((u) => u.n === n)) return true;
+    recentLockRef.current.push({ n, t: now });
+    if (recentLockRef.current.length > 30) {
+      recentLockRef.current = recentLockRef.current.slice(-20);
+    }
+    return false;
+  }, []);
+
   const remember = useCallback((text, store = seenRef) => {
     const n = norm(text);
     if (!n || store.current.has(n)) return false;
     store.current.add(n);
-    if (store.current.size > 50) {
-      store.current = new Set([...store.current].slice(-25));
+    if (store.current.size > 60) {
+      store.current = new Set([...store.current].slice(-30));
     }
     return true;
   }, []);
 
   const speak = useCallback((text, langCode) => {
-    if (!ttsOn || !text || !window.speechSynthesis) return;
+    if (!ttsOnRef.current || !text || !window.speechSynthesis) return;
     window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
     u.lang = langCode;
     u.rate = 0.92;
     window.speechSynthesis.speak(u);
-  }, [ttsOn]);
+  }, []);
 
-  /* ── Listen: capture → detect language → translate to English ── */
+  /* ── Listen mode ── */
   const addListenLine = useCallback(async (text, lang) => {
-    if (!remember(text, listenSeenRef)) return;
+    if (isRecentDupe(text) || !remember(text, listenSeenRef)) return;
     const id = nextId();
     const time = formatTime();
-    // Optimistic row while translating
     setListenLines((prev) => [...prev, {
       id, text, translation: null, translating: true, lang, time,
     }]);
     setListenInterim('');
 
-    const toEn = lang.key === 'en' ? text : await translate(text, lang.apiCode, 'en');
+    const toEn = lang.key === 'en'
+      ? text
+      : await translate(text, lang.apiCode, 'en');
+
     setListenLines((prev) => prev.map((line) => (
       line.id === id
-        ? { ...line, translation: toEn || '(translation unavailable)', translating: false }
+        ? { ...line, translation: toEn || text, translating: false }
         : line
     )));
-  }, [remember]);
+  }, [remember, isRecentDupe]);
 
   const runListenLoop = useCallback(async (lang) => {
-    setListenStatus(`Listening · ${lang.name}`);
+    setListenStatus(`Listening · ${lang.name} — tap Stop when done`);
     listenLangRef.current = lang;
     setListenLang(lang);
 
-    await listenLoop({
+    await keepListening({
       activeRef: listenActiveRef,
-      langRef: listenLangRef,
-      gapMs: 500,
-      onInterim: (t) => { if (listenActiveRef.current) setListenInterim(t); },
-      onLine: async (text) => {
+      getLang: () => listenLangRef.current?.speechCode || lang.speechCode,
+      onInterim: (t) => {
+        if (listenActiveRef.current) setListenInterim(t);
+      },
+      onFinal: (text) => {
         if (!listenActiveRef.current) return;
         const current = listenLangRef.current || lang;
-        // Re-label if script clearly points elsewhere
         const guessed = detectLanguageFromText(text);
         const useLang = (guessed && guessed.key !== '?' && guessed.key !== 'en' && UNIQUE_SCRIPT_KEYS.has(guessed.key))
           ? guessed
@@ -210,11 +260,26 @@ export default function App() {
         if (useLang.key !== current.key && useLang.speechCode) {
           listenLangRef.current = useLang;
           setListenLang(useLang);
-          setListenStatus(`Listening · ${useLang.name}`);
+          setListenStatus(`Listening · ${useLang.name} — tap Stop when done`);
+          restartMic(); // soft restart — keepListening stays alive
         }
-        await addListenLine(text, useLang.key === 'en' ? ENGLISH : useLang);
+        // Don't await — keepListening must stay free
+        addListenLine(text, useLang.key === 'en' ? ENGLISH : useLang);
+      },
+      onError: (msg) => {
+        setMicError(msg);
+        listenActiveRef.current = false;
+        setListening(false);
+        setListenStatus('');
       },
     });
+
+    // If the loop exited without an explicit stop, keep UI honest
+    if (!listenActiveRef.current) {
+      setListening(false);
+      setListenInterim('');
+      setListenStatus('');
+    }
   }, [addListenLine]);
 
   const stopListen = useCallback(() => {
@@ -238,23 +303,22 @@ export default function App() {
       return;
     }
 
-    // Stop conversation if running
     converseActiveRef.current = false;
     setConversing(false);
     stopMic();
 
     setMicError(null);
     listenSeenRef.current.clear();
+    recentLockRef.current = [];
     listenActiveRef.current = true;
     listenDetectRef.current = true;
     setListening(true);
 
-    // If we already know the language, skip detection
     let lang = listenLangRef.current;
 
     if (!lang) {
       setDetecting(true);
-      setListenStatus('Detecting language… speak now');
+      setListenStatus('Detecting language… keep talking');
       const candidates = LANGUAGE_LIST.filter((l) => UNIQUE_SCRIPT_KEYS.has(l.key));
       lang = await detectSpokenLanguage(
         candidates,
@@ -267,7 +331,6 @@ export default function App() {
       if (!listenActiveRef.current) return;
 
       if (!lang) {
-        // Couldn't auto-detect (likely Latin script) — ask user to pick
         setListening(false);
         listenActiveRef.current = false;
         setListenStatus('');
@@ -286,12 +349,11 @@ export default function App() {
     setLangSearch('');
     setMicError(null);
 
-    // If already listening, just switch the recognizer language — don't spawn another loop
     if (listenActiveRef.current) {
       listenLangRef.current = lang;
       setListenLang(lang);
-      setListenStatus(`Listening · ${lang.name}`);
-      stopMic(); // current listenOnce aborts; loop continues with new lang
+      setListenStatus(`Listening · ${lang.name} — tap Stop when done`);
+      restartMic(); // soft restart — keepListening stays alive
       return;
     }
 
@@ -312,7 +374,7 @@ export default function App() {
     await runListenLoop(lang);
   }, [runListenLoop]);
 
-  /* ── Conversation: continuous EN ↔ other, print both ── */
+  /* ── Conversation mode ── */
   const stopConverse = useCallback(() => {
     converseActiveRef.current = false;
     setConversing(false);
@@ -322,7 +384,7 @@ export default function App() {
   }, []);
 
   const addConverseMessage = useCallback(async (who, said, fromCode, toCode, speakLang) => {
-    if (!remember(said, seenRef)) return;
+    if (isRecentDupe(said) || !remember(said, seenRef)) return;
     const id = nextId();
     setMessages((prev) => [...prev, {
       id, who, said, translation: null, translating: true,
@@ -332,83 +394,81 @@ export default function App() {
     const translated = await translate(said, fromCode, toCode);
     setMessages((prev) => prev.map((m) => (
       m.id === id
-        ? { ...m, translation: translated || '(translation unavailable)', translating: false }
+        ? { ...m, translation: translated || said, translating: false }
         : m
     )));
-    if (translated) speak(translated, speakLang);
-  }, [remember, speak]);
+    if (translated && translated !== said) speak(translated, speakLang);
+  }, [remember, speak, isRecentDupe]);
+
+  const handleConverseFinal = useCallback((text) => {
+    if (!converseActiveRef.current) return;
+    const lang = languageRef.current;
+    const focus = converseFocusRef.current;
+    const listeningForYou = focus === 'you';
+
+    if (listeningForYou) {
+      if (!isEnglish(text) && looksLikeForeign(text, lang)) {
+        addConverseMessage('them', text, lang.apiCode, 'en', ENGLISH.speechCode);
+        // Stay on You unless they clearly spoke — then switch to Them next? Prefer switch after them
+        converseFocusRef.current = 'you';
+        setConverseFocus('you');
+      } else {
+        addConverseMessage('you', text, 'en', lang.apiCode, lang.speechCode);
+        // After you speak, listen for them
+        converseFocusRef.current = 'them';
+        setConverseFocus('them');
+        setConverseStatus(`Listening for ${lang.name} — tap Stop when done`);
+        restartMic(); // soft restart in their language
+      }
+      return;
+    }
+
+    // Listening for them
+    if (isEnglish(text) && !looksLikeForeign(text, lang)) {
+      addConverseMessage('you', text, 'en', lang.apiCode, lang.speechCode);
+      converseFocusRef.current = 'them';
+      setConverseFocus('them');
+      return;
+    }
+
+    if (looksLikeForeign(text, lang) || !UNIQUE_SCRIPT_KEYS.has(lang.key)) {
+      addConverseMessage('them', text, lang.apiCode, 'en', ENGLISH.speechCode);
+      converseFocusRef.current = 'you';
+      setConverseFocus('you');
+      setConverseStatus('Listening for English — tap Stop when done');
+      restartMic(); // soft restart in English
+    }
+    // else: unique-script garbage — ignore, keep listening
+  }, [addConverseMessage]);
 
   const runConversationLoop = useCallback(async () => {
-    while (converseActiveRef.current) {
-      const lang = languageRef.current;
-      const focus = converseFocusRef.current;
-      const listeningForYou = focus === 'you';
+    setConverseStatus(`Listening for ${languageRef.current.name} — tap Stop when done`);
 
-      setConverseStatus(
-        listeningForYou
-          ? 'Listening for English…'
-          : `Listening for ${lang.name}…`,
-      );
+    await keepListening({
+      activeRef: converseActiveRef,
+      getLang: () => (
+        converseFocusRef.current === 'you'
+          ? ENGLISH.speechCode
+          : (languageRef.current?.speechCode || 'en-US')
+      ),
+      onInterim: (t) => {
+        if (converseActiveRef.current) setTurnInterim(t);
+      },
+      onFinal: handleConverseFinal,
+      onError: (msg) => {
+        setMicError(msg);
+        converseActiveRef.current = false;
+        setConversing(false);
+        setConverseStatus('');
+      },
+    });
 
-      const recLang = listeningForYou ? ENGLISH.speechCode : lang.speechCode;
-      const text = await listenOnce({
-        lang: recLang,
-        timeoutMs: 10000,
-        onInterim: (t) => {
-          if (converseActiveRef.current) setTurnInterim(t);
-        },
-      });
-
-      if (!converseActiveRef.current) break;
+    if (!converseActiveRef.current) {
+      setConversing(false);
       setTurnInterim('');
-
-      if (!text) {
-        // No speech — gently flip focus so the other person gets a turn
-        const next = listeningForYou ? 'them' : 'you';
-        converseFocusRef.current = next;
-        setConverseFocus(next);
-        await sleep(300);
-        continue;
-      }
-
-      if (listeningForYou) {
-        // Expect English from you
-        if (!isEnglish(text) && looksLikeForeign(text, lang)) {
-          // They spoke while we were on English — treat as them
-          await addConverseMessage('them', text, lang.apiCode, 'en', ENGLISH.speechCode);
-          converseFocusRef.current = 'you';
-          setConverseFocus('you');
-        } else {
-          await addConverseMessage('you', text, 'en', lang.apiCode, lang.speechCode);
-          // After you speak, listen for them
-          converseFocusRef.current = 'them';
-          setConverseFocus('them');
-        }
-      } else {
-        // Expect their language
-        if (isEnglish(text) || !looksLikeForeign(text, lang)) {
-          // English (or unclear) while listening for them → treat as you if English
-          if (isEnglish(text)) {
-            await addConverseMessage('you', text, 'en', lang.apiCode, lang.speechCode);
-            converseFocusRef.current = 'them';
-            setConverseFocus('them');
-          } else if (!UNIQUE_SCRIPT_KEYS.has(lang.key)) {
-            // Latin-script languages: accept transcript as "them"
-            await addConverseMessage('them', text, lang.apiCode, 'en', ENGLISH.speechCode);
-            converseFocusRef.current = 'you';
-            setConverseFocus('you');
-          }
-          // else: unique-script mismatch — ignore garbage
-        } else {
-          await addConverseMessage('them', text, lang.apiCode, 'en', ENGLISH.speechCode);
-          converseFocusRef.current = 'you';
-          setConverseFocus('you');
-        }
-      }
-
-      await sleep(400);
+      setConverseStatus('');
     }
-  }, [addConverseMessage]);
+  }, [handleConverseFinal]);
 
   const toggleConverse = useCallback(async () => {
     if (!speechSupported()) {
@@ -420,11 +480,11 @@ export default function App() {
       return;
     }
 
-    // Stop listen mode
     stopListen();
 
     setMicError(null);
     seenRef.current.clear();
+    recentLockRef.current = [];
     converseActiveRef.current = true;
     converseFocusRef.current = 'them';
     setConverseFocus('them');
@@ -433,10 +493,17 @@ export default function App() {
   }, [conversing, stopConverse, stopListen, runConversationLoop]);
 
   const setFocus = useCallback((who) => {
+    if (converseFocusRef.current === who) return;
     converseFocusRef.current = who;
     setConverseFocus(who);
-    // Restart current utterance so language switches immediately
-    if (converseActiveRef.current) stopMic();
+    const lang = languageRef.current;
+    setConverseStatus(
+      who === 'you'
+        ? 'Listening for English — tap Stop when done'
+        : `Listening for ${lang.name} — tap Stop when done`,
+    );
+    setTurnInterim('');
+    if (converseActiveRef.current) restartMic(); // soft restart with new lang
   }, []);
 
   /* ── Language picker ── */
@@ -456,8 +523,14 @@ export default function App() {
     setLanguage(lang);
     setShowLangPicker(false);
     setLangSearch('');
-    // If conversation is running, mic will pick up new language via languageRef
-    if (converseActiveRef.current) stopMic();
+    if (converseActiveRef.current) {
+      setConverseStatus(
+        converseFocusRef.current === 'you'
+          ? 'Listening for English — tap Stop when done'
+          : `Listening for ${lang.name} — tap Stop when done`,
+      );
+      restartMic();
+    }
   }, [langPickerFor, pickListenLanguage]);
 
   const switchTab = (next) => {
@@ -494,8 +567,8 @@ export default function App() {
               {listenLines.length === 0 && !listenInterim && !detecting && (
                 <div className="empty">
                   <span className="empty-icon">👂</span>
-                  <p>Tap Start. I’ll pick up their language when I can, then show what they say in English.</p>
-                  <p className="empty-note">You don’t speak — just hold the phone near them.</p>
+                  <p>Tap Start. Keeps listening through pauses — only Stop ends it.</p>
+                  <p className="empty-note">You don’t speak — hold the phone near them.</p>
                 </div>
               )}
 
@@ -568,7 +641,7 @@ export default function App() {
                 onClick={toggleListen}
               >
                 <span className="listen-btn-dot" />
-                {listening || detecting ? 'Listening… tap to stop' : 'Start listening'}
+                {listening || detecting ? 'Stop listening' : 'Start listening'}
               </button>
             </div>
           </div>
@@ -604,9 +677,9 @@ export default function App() {
               {messages.length === 0 && !turnInterim && (
                 <div className="empty">
                   <span className="empty-icon">💬</span>
-                  <p>Tap Start. I’ll print both languages as each person talks.</p>
+                  <p>Tap Start. It keeps going through pauses — only Stop ends it.</p>
                   <p className="empty-note">
-                    English ↔ {language.name}. Use You / Them to steer the mic if needed.
+                    English ↔ {language.name}. Tap You / Them to switch who the mic is set for.
                   </p>
                 </div>
               )}
@@ -681,7 +754,7 @@ export default function App() {
                 style={{ marginTop: conversing ? 10 : 0 }}
               >
                 <span className="listen-btn-dot" />
-                {conversing ? 'In conversation… tap to stop' : 'Start conversation'}
+                {conversing ? 'Stop conversation' : 'Start conversation'}
               </button>
             </div>
           </div>
