@@ -580,7 +580,7 @@ export default function App() {
             </header>
 
             <div className="scroll">
-              {listenLines.length === 0 && !listenInterim && !detecting && (
+              {listenLines.length === 0 && !listenInterim && !detecting && !listening && (
                 <div className="empty">
                   <span className="empty-icon">👂</span>
                   <p>Pick their language, then tap Start. No beeps — it listens silently and types as they talk.</p>

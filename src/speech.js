@@ -333,11 +333,14 @@ async function keepListeningWhisper({
       if (pcm.length < MIN_SAMPLES || !hasAudibleSpeech(pcm)) continue;
 
       try {
+        onPhase?.('transcribing');
         const { apiCode } = resolveLang(getLang);
         const text = await transcribePcm(pcm, ctx.sampleRate, apiCode);
         if (text && activeRef.current && myGen === gen) await onFinal?.(text);
       } catch (err) {
         console.error('Whisper transcription failed:', err);
+      } finally {
+        if (activeRef.current && myGen === gen) onPhase?.('hearing');
       }
     }
     processing = false;
@@ -433,14 +436,6 @@ export async function keepListening({
   forceEndCapture = false;
   engineMode = null;
 
-  try {
-    await ensureMedia();
-  } catch {
-    onError?.('Microphone access denied — allow it in browser settings.');
-    activeRef.current = false;
-    return;
-  }
-
   // Silent engine only. Never fall back to Chrome SpeechRecognition because
   // that would bring the Android beep loop back.
   try {
@@ -454,7 +449,16 @@ export async function keepListening({
     onModel?.({ status: 'error' });
     onError?.('Silent speech engine couldn’t start. Reload the app and try again.');
     activeRef.current = false;
-    teardownMedia();
+    return;
+  }
+
+  // Open the microphone only after the model is ready. Otherwise audio spoken
+  // during first-load setup is consumed before transcription can begin.
+  try {
+    await ensureMedia();
+  } catch {
+    onError?.('Microphone access denied — allow it in browser settings.');
+    activeRef.current = false;
     return;
   }
 
