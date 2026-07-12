@@ -255,9 +255,15 @@ export default function App() {
           setListenStatus(`On · ${listenLangRef.current?.name || lang.name} — speak anytime`);
           return;
         }
+        if (info.status === 'fallback') {
+          setMicError('Silent mode couldn’t load. Using phone speech (may beep once when they talk).');
+          setListenStatus(`On · ${listenLangRef.current?.name || lang.name} — speak anytime`);
+          return;
+        }
         const pct = typeof info.progress === 'number' ? ` ${Math.round(info.progress)}%` : '';
-        setListenStatus(`Loading speech engine…${pct}`);
+        setListenStatus(`Loading silent speech engine…${pct}`);
       },
+      onEngine: () => {},
       onPhase: (phase) => {
         if (!listenActiveRef.current) return;
         const name = listenLangRef.current?.name || lang.name;
@@ -438,15 +444,19 @@ export default function App() {
       },
       onModel: (info) => {
         if (!converseActiveRef.current) return;
+        const focus = converseFocusRef.current;
+        const label = focus === 'you' ? 'English' : (languageRef.current?.name || '');
         if (info.status === 'ready') {
-          const label = converseFocusRef.current === 'you'
-            ? 'English'
-            : (languageRef.current?.name || '');
+          setConverseStatus(`On · ${label} — speak anytime`);
+          return;
+        }
+        if (info.status === 'fallback') {
+          setMicError('Silent mode couldn’t load. Using phone speech (may beep once when someone talks).');
           setConverseStatus(`On · ${label} — speak anytime`);
           return;
         }
         const pct = typeof info.progress === 'number' ? ` ${Math.round(info.progress)}%` : '';
-        setConverseStatus(`Loading speech engine…${pct}`);
+        setConverseStatus(`Loading silent speech engine…${pct}`);
       },
       onPhase: (phase) => {
         if (!converseActiveRef.current) return;
@@ -574,7 +584,7 @@ export default function App() {
                 <div className="empty">
                   <span className="empty-icon">👂</span>
                   <p>Pick their language, then tap Start. No beeps — it listens silently and types as they talk.</p>
-                  <p className="empty-note">First start may download a small speech model (one time).</p>
+                  <p className="empty-note">First start may download a silent speech model on Wi‑Fi (one time). If that fails, it falls back automatically.</p>
                 </div>
               )}
 

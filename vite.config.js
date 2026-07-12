@@ -56,6 +56,22 @@ export default defineConfig({
             },
           },
           {
+            urlPattern: /^https:\/\/cdn\.hf\.co\/.*/i,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'hf-cdn-cache',
+              expiration: { maxEntries: 40, maxAgeSeconds: 60 * 60 * 24 * 30 },
+            },
+          },
+          {
+            urlPattern: /^https:\/\/([a-z0-9-]+\.)?hf\.co\/.*/i,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'hf-any-cache',
+              expiration: { maxEntries: 40, maxAgeSeconds: 60 * 60 * 24 * 30 },
+            },
+          },
+          {
             urlPattern: /\.wasm$/i,
             handler: 'CacheFirst',
             options: {
