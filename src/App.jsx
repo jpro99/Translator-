@@ -252,12 +252,12 @@ export default function App() {
       onModel: (info) => {
         if (!listenActiveRef.current) return;
         if (info.status === 'ready') {
-          setListenStatus(`On · ${listenLangRef.current?.name || lang.name} — speak anytime`);
+          setListenStatus(`Listening · ${listenLangRef.current?.name || lang.name}`);
           return;
         }
         if (info.status === 'fallback') {
           setMicError('Silent mode couldn’t load. Using phone speech (may beep once when they talk).');
-          setListenStatus(`On · ${listenLangRef.current?.name || lang.name} — speak anytime`);
+          setListenStatus(`Listening · ${listenLangRef.current?.name || lang.name}`);
           return;
         }
         const pct = typeof info.progress === 'number' ? ` ${Math.round(info.progress)}%` : '';
@@ -267,9 +267,9 @@ export default function App() {
       onPhase: (phase) => {
         if (!listenActiveRef.current) return;
         const name = listenLangRef.current?.name || lang.name;
-        if (phase === 'hearing') setListenStatus(`Hearing · ${name}`);
+        if (phase === 'hearing') setListenStatus(`Listening · ${name}`);
         else if (phase === 'transcribing') setListenStatus(`Transcribing · ${name}`);
-        else setListenStatus(`On · ${name} — speak anytime`);
+        else setListenStatus(`Listening · ${name}`);
       },
       onInterim: (t) => {
         if (listenActiveRef.current) setListenInterim(t || '');
@@ -357,7 +357,7 @@ export default function App() {
     setListenLang(lang);
 
     if (listenActiveRef.current) {
-      setListenStatus(`On · ${lang.name} — speak anytime`);
+      setListenStatus(`Listening · ${lang.name}`);
       restartMic();
       return;
     }

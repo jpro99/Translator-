@@ -1,14 +1,12 @@
 /**
  * Silent-first speech capture.
  *
- * Primary: Web Audio PCM + on-device Whisper (no beeps).
- * Fallback: voice-activated Web Speech API (one beep when talk starts) if
- * the Whisper model can’t download/init on this device.
+ * Web Audio PCM + on-device Whisper. Chrome SpeechRecognition is never
+ * used, because Android beeps every time that API starts.
  */
 
 let gen = 0;
 let media = null;
-let activeRec = null;
 let transcriberPromise = null;
 let forceEndCapture = false;
 let engineMode = null; // 'whisper' | 'webspeech'
@@ -26,31 +24,9 @@ const WHISPER_LANG = {
   sw: 'swahili', af: 'afrikaans',
 };
 
-function getSR() {
-  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
-}
-
 export function speechSupported() {
   return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia
     && (window.AudioContext || window.webkitAudioContext));
-}
-
-function clearRecHandlers(rec) {
-  if (!rec) return;
-  rec.onstart = null;
-  rec.onresult = null;
-  rec.onerror = null;
-  rec.onend = null;
-}
-
-function stopRecognitionOnly() {
-  const cur = activeRec;
-  activeRec = null;
-  if (!cur) return;
-  clearRecHandlers(cur.rec);
-  try { cur.rec.stop(); } catch {
-    try { cur.rec.abort(); } catch {}
-  }
 }
 
 function teardownMedia() {
@@ -67,13 +43,11 @@ function teardownMedia() {
 
 export function restartMic() {
   forceEndCapture = true;
-  stopRecognitionOnly();
 }
 
 export async function stopMic() {
   gen += 1;
   forceEndCapture = true;
-  stopRecognitionOnly();
   teardownMedia();
   await sleep(100);
 }
@@ -109,6 +83,29 @@ function downsampleTo16k(input, fromRate) {
     out[i] = input[Math.min(input.length - 1, Math.floor(i * ratio))];
   }
   return out;
+}
+
+function hasAudibleSpeech(pcm) {
+  if (!pcm?.length) return false;
+  const windowSize = 1024;
+  let activeWindows = 0;
+  let peak = 0;
+
+  for (let start = 0; start < pcm.length; start += windowSize) {
+    const end = Math.min(start + windowSize, pcm.length);
+    let sum = 0;
+    for (let i = start; i < end; i += 1) {
+      const sample = pcm[i];
+      sum += sample * sample;
+      peak = Math.max(peak, Math.abs(sample));
+    }
+    const rms = Math.sqrt(sum / Math.max(1, end - start));
+    // Phone speech is commonly 0.008–0.15 RMS. The previous 0.04 gate
+    // dropped normal/quiet voices before they were ever recorded.
+    if (rms >= 0.0035) activeWindows += 1;
+  }
+
+  return peak >= 0.012 && activeWindows >= 3;
 }
 
 async function ensureMedia() {
@@ -264,206 +261,66 @@ async function transcribePcm(pcm, sampleRate, apiCode) {
 async function keepListeningWhisper({
   activeRef, getLang, onInterim, onFinal, onError, onPhase, myGen,
 }) {
-  const { analyser, ctx, capture } = media;
-  const levelBuf = new Uint8Array(analyser.fftSize);
+  const { ctx, capture } = media;
+  const SEGMENT_MS = 5000;
+  const MIN_SAMPLES = ctx.sampleRate * 0.5;
+  const queue = [];
+  let processing = false;
 
-  const THRESHOLD = 0.04;
-  const START_MS = 180;
-  const END_SILENCE_MS = 900;
-  const MAX_UTTER_MS = 20000;
-  const POLL_MS = 70;
-  const MIN_SAMPLES = ctx.sampleRate * 0.35;
+  const processQueue = async () => {
+    if (processing) return;
+    processing = true;
+    while (queue.length && activeRef.current && myGen === gen) {
+      const pcm = queue.shift();
+      if (pcm.length < MIN_SAMPLES || !hasAudibleSpeech(pcm)) continue;
 
-  let voicedFor = 0;
-  let silenceFor = 0;
-  let capturing = false;
-  let captureStartedAt = 0;
-  let busy = false;
+      try {
+        const { apiCode } = resolveLang(getLang);
+        const text = await transcribePcm(pcm, ctx.sampleRate, apiCode);
+        if (text && activeRef.current && myGen === gen) await onFinal?.(text);
+      } catch (err) {
+        console.error('Whisper transcription failed:', err);
+      }
+    }
+    processing = false;
+  };
 
-  const finishUtterance = async () => {
-    if (!capturing) return;
-    capturing = false;
-    capture.on = false;
+  // Always record. Voice gating before capture was losing normal Spanish
+  // speech on phone microphones. We filter silent chunks after recording,
+  // while the next chunk is already being captured.
+  capture.chunks = [];
+  capture.on = true;
+  onInterim?.('');
+  onPhase?.('hearing');
+
+  while (activeRef.current && myGen === gen) {
+    if (media?.ctx?.state === 'suspended') {
+      try { await media.ctx.resume(); } catch {}
+    }
+
+    await sleep(SEGMENT_MS);
+    if (!activeRef.current || myGen !== gen) break;
+
     const chunks = capture.chunks;
     capture.chunks = [];
     forceEndCapture = false;
-
-    const pcm = concatFloat32(chunks);
-    if (pcm.length < MIN_SAMPLES) {
-      onPhase?.('idle');
-      onInterim?.('');
-      return;
+    if (chunks.length) {
+      queue.push(concatFloat32(chunks));
+      void processQueue();
     }
-
-    onPhase?.('transcribing');
-    onInterim?.('…');
-    busy = true;
-    try {
-      const { apiCode } = resolveLang(getLang);
-      const text = await transcribePcm(pcm, ctx.sampleRate, apiCode);
-      onInterim?.('');
-      if (text && activeRef.current && myGen === gen) await onFinal?.(text);
-    } catch (err) {
-      console.error(err);
-      onInterim?.('');
-    } finally {
-      busy = false;
-      if (activeRef.current && myGen === gen) onPhase?.('idle');
-    }
-  };
-
-  onPhase?.('idle');
-
-  while (activeRef.current && myGen === gen) {
-    if (media?.ctx?.state === 'suspended') {
-      try { await media.ctx.resume(); } catch {}
-    }
-    if (busy) {
-      await sleep(POLL_MS);
-      continue;
-    }
-
-    const speaking = voiceLevel(analyser, levelBuf) >= THRESHOLD;
-
-    if (!capturing) {
-      if (speaking) {
-        voicedFor += POLL_MS;
-        if (voicedFor >= START_MS) {
-          capturing = true;
-          captureStartedAt = Date.now();
-          silenceFor = 0;
-          capture.chunks = [];
-          capture.on = true;
-          onPhase?.('hearing');
-          onInterim?.('Listening…');
-        }
-      } else voicedFor = 0;
-    } else {
-      if (speaking) silenceFor = 0;
-      else silenceFor += POLL_MS;
-
-      if (forceEndCapture || silenceFor >= END_SILENCE_MS
-        || Date.now() - captureStartedAt > MAX_UTTER_MS) {
-        await finishUtterance();
-        voicedFor = 0;
-        silenceFor = 0;
-      }
-    }
-
-    await sleep(POLL_MS);
   }
 
   capture.on = false;
-}
-
-/* ── Web Speech fallback (may beep once when speech starts) ─────────── */
-function startWebSpeech({ lang, myGen, activeRef, onInterim, onFinal, onError, onPhase, state }) {
-  if (activeRec) return;
-  const SR = getSR();
-  if (!SR) return;
-
-  let rec;
-  try { rec = new SR(); } catch { return; }
-
-  rec.lang = lang || 'en-US';
-  rec.continuous = true;
-  rec.interimResults = true;
-  rec.maxAlternatives = 1;
-
-  const session = { rec };
-  activeRec = session;
-  onPhase?.('hearing');
-
-  rec.onresult = (event) => {
-    if (myGen !== gen || !activeRef.current) return;
-    let interim = '';
-    for (let i = event.resultIndex; i < event.results.length; i += 1) {
-      const result = event.results[i];
-      const text = (result[0]?.transcript || '').trim();
-      if (!text) continue;
-      if (result.isFinal) Promise.resolve(onFinal?.(text)).catch(() => {});
-      else interim = text;
-    }
-    if (interim) onInterim?.(interim);
-    else if (event.results[event.results.length - 1]?.isFinal) onInterim?.('');
-  };
-
-  rec.onerror = (event) => {
-    const err = event?.error || '';
-    if (err === 'no-speech' || err === 'aborted' || err === 'speech-timeout') return;
-    if (err === 'not-allowed') {
-      onError?.('Microphone access denied — allow it in browser settings.');
-      activeRef.current = false;
-    }
-  };
-
-  rec.onend = () => {
-    if (activeRec === session) activeRec = null;
-    clearRecHandlers(rec);
-    state.cooldownUntil = Date.now() + 700;
-    state.voicedFor = 0;
-    onPhase?.('idle');
-  };
-
-  try {
-    rec.start();
-  } catch {
-    if (activeRec === session) activeRec = null;
-    state.cooldownUntil = Date.now() + 700;
-    onPhase?.('idle');
+  const finalChunks = capture.chunks;
+  capture.chunks = [];
+  if (finalChunks.length && activeRef.current && myGen === gen) {
+    queue.push(concatFloat32(finalChunks));
+    await processQueue();
   }
-}
-
-async function keepListeningWebSpeech({
-  activeRef, getLang, onInterim, onFinal, onError, onPhase, myGen,
-}) {
-  if (!getSR()) {
-    onError?.('Speech isn’t supported in this browser. Try Chrome.');
-    activeRef.current = false;
-    return;
-  }
-
-  const { analyser } = media;
-  const levelBuf = new Uint8Array(analyser.fftSize);
-  const state = { cooldownUntil: 0, voicedFor: 0 };
-  const THRESHOLD = 0.04;
-  const SPEAK_MS = 200;
-  const POLL_MS = 80;
-
-  onPhase?.('idle');
-
-  while (activeRef.current && myGen === gen) {
-    if (media?.ctx?.state === 'suspended') {
-      try { await media.ctx.resume(); } catch {}
-    }
-
-    const speaking = voiceLevel(analyser, levelBuf) >= THRESHOLD;
-    if (speaking) state.voicedFor += POLL_MS;
-    else state.voicedFor = 0;
-
-    const { speechCode } = resolveLang(getLang);
-    if (!activeRec && Date.now() >= state.cooldownUntil && state.voicedFor >= SPEAK_MS) {
-      startWebSpeech({
-        lang: speechCode,
-        myGen,
-        activeRef,
-        onInterim,
-        onFinal,
-        onError,
-        onPhase,
-        state,
-      });
-      state.voicedFor = 0;
-    }
-
-    await sleep(POLL_MS);
-  }
-
-  stopRecognitionOnly();
 }
 
 /**
- * Always-on listen until Stop. Prefers silent Whisper; falls back if needed.
+ * Always-on silent listen until Stop.
  */
 export async function keepListening({
   activeRef,
@@ -492,19 +349,21 @@ export async function keepListening({
     return;
   }
 
-  // Try silent engine first
-  let useWhisper = false;
+  // Silent engine only. Never fall back to Chrome SpeechRecognition because
+  // that would bring the Android beep loop back.
   try {
     await getTranscriber(onModel);
-    useWhisper = true;
     engineMode = 'whisper';
     onEngine?.('whisper');
   } catch (err) {
-    console.warn('Silent speech engine failed, falling back:', err);
-    engineMode = 'webspeech';
-    onEngine?.('webspeech');
-    // Don’t hard-fail — keep the app usable
-    onModel?.({ status: 'fallback' });
+    console.error('Silent speech engine failed:', err);
+    engineMode = 'error';
+    onEngine?.('error');
+    onModel?.({ status: 'error' });
+    onError?.('Silent speech engine couldn’t start. Reload the app and try again.');
+    activeRef.current = false;
+    teardownMedia();
+    return;
   }
 
   if (!activeRef.current || myGen !== gen) {
@@ -513,18 +372,11 @@ export async function keepListening({
   }
 
   try {
-    if (useWhisper) {
-      await keepListeningWhisper({
-        activeRef, getLang, onInterim, onFinal, onError, onPhase, myGen,
-      });
-    } else {
-      await keepListeningWebSpeech({
-        activeRef, getLang, onInterim, onFinal, onError, onPhase, myGen,
-      });
-    }
+    await keepListeningWhisper({
+      activeRef, getLang, onInterim, onFinal, onError, onPhase, myGen,
+    });
   } finally {
     if (myGen === gen) {
-      stopRecognitionOnly();
       teardownMedia();
     }
   }
