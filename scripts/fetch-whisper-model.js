@@ -8,8 +8,8 @@ const https = require('https');
 const http = require('http');
 const { URL } = require('url');
 
-const ROOT = path.join(__dirname, '..', 'public', 'models', 'Xenova', 'whisper-tiny');
-const BASE = 'https://huggingface.co/Xenova/whisper-tiny/resolve/main';
+const ROOT = path.join(__dirname, '..', 'public', 'models', 'Xenova', 'whisper-base');
+const BASE = 'https://huggingface.co/Xenova/whisper-base/resolve/main';
 
 const FILES = [
   'config.json',
@@ -70,7 +70,7 @@ async function main() {
     console.log(fs.statSync(dest).size);
   }
   if (missing === 0) console.log('Whisper model already present');
-  else console.log(`Fetched ${missing} Whisper model file(s) → public/models/Xenova/whisper-tiny`);
+  else console.log(`Fetched ${missing} Whisper model file(s) → public/models/Xenova/whisper-base`);
 }
 
 main().catch((err) => {

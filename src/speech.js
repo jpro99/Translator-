@@ -108,6 +108,52 @@ function hasAudibleSpeech(pcm) {
   return peak >= 0.012 && activeWindows >= 3;
 }
 
+function cleanTranscript(raw) {
+  const text = (raw || '')
+    .replace(/\[(?:music|song|singing|applause|noise|silence)\]/gi, ' ')
+    .replace(/\((?:music|song|singing|applause|noise|silence)\)/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!text || text.length > 280) return '';
+  if (/^\([^)]*\)$/.test(text) || /^\[[^\]]*\]$/.test(text)) return '';
+
+  const words = text
+    .toLocaleLowerCase()
+    .match(/[\p{L}\p{N}']+/gu) || [];
+
+  if (words.length >= 5) {
+    let longestRun = 1;
+    let run = 1;
+    const counts = new Map();
+
+    for (let i = 0; i < words.length; i += 1) {
+      counts.set(words[i], (counts.get(words[i]) || 0) + 1);
+      if (i > 0 && words[i] === words[i - 1]) {
+        run += 1;
+        longestRun = Math.max(longestRun, run);
+      } else {
+        run = 1;
+      }
+    }
+
+    const mostCommon = Math.max(...counts.values());
+    const uniqueRatio = counts.size / words.length;
+
+    // Reject classic Whisper loops: "the the the…", repeated fragments,
+    // or hundreds of tokens from a five-second audio segment.
+    if (longestRun >= 4) return '';
+    if (words.length >= 8 && mostCommon / words.length >= 0.45) return '';
+    if (words.length >= 12 && uniqueRatio < 0.28) return '';
+    if (words.length > 55) return '';
+  }
+
+  // Reject invented syllable loops such as "kagakagagagang".
+  if (words.some((word) => /(.{1,3})\1{3,}/iu.test(word))) return '';
+
+  return text;
+}
+
 async function ensureMedia() {
   if (media?.ctx) {
     if (media.ctx.state === 'suspended') {
@@ -190,7 +236,7 @@ async function getTranscriber(onModel) {
     try {
       const transcriber = await pipeline(
         'automatic-speech-recognition',
-        'Xenova/whisper-tiny',
+        'Xenova/whisper-base',
         {
           dtype: 'q8',
           device: 'wasm',
@@ -213,7 +259,7 @@ async function getTranscriber(onModel) {
       env.allowRemoteModels = true;
       const transcriber = await pipeline(
         'automatic-speech-recognition',
-        'Xenova/whisper-tiny',
+        'Xenova/whisper-base',
         {
           dtype: 'q8',
           device: 'wasm',
@@ -247,25 +293,37 @@ async function transcribePcm(pcm, sampleRate, apiCode) {
     task: 'transcribe',
     chunk_length_s: 20,
     stride_length_s: 3,
+    max_new_tokens: 64,
+    repetition_penalty: 1.15,
+    no_repeat_ngram_size: 3,
+    do_sample: false,
   };
   const lang = WHISPER_LANG[apiCode];
   if (lang) opts.language = lang;
 
   const result = await transcriber(audio, opts);
-  return (typeof result === 'string' ? result : result?.text || '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return cleanTranscript(typeof result === 'string' ? result : result?.text || '');
 }
 
 /* ── Whisper loop (silent) ─────────────────────────────────────────── */
 async function keepListeningWhisper({
   activeRef, getLang, onInterim, onFinal, onError, onPhase, myGen,
 }) {
-  const { ctx, capture } = media;
-  const SEGMENT_MS = 5000;
+  const { analyser, ctx, capture } = media;
+  const POLL_MS = 70;
+  const START_MS = 140;
+  const END_SILENCE_MS = 850;
+  const MAX_UTTERANCE_MS = 14000;
+  const PRE_ROLL_CHUNKS = Math.max(8, Math.ceil(ctx.sampleRate / 4096));
   const MIN_SAMPLES = ctx.sampleRate * 0.5;
+  const levelBuffer = new Uint8Array(analyser.fftSize);
   const queue = [];
   let processing = false;
+  let speechActive = false;
+  let voicedFor = 0;
+  let silenceFor = 0;
+  let speechStartedAt = 0;
+  let noiseFloor = 0.002;
 
   const processQueue = async () => {
     if (processing) return;
@@ -285,9 +343,22 @@ async function keepListeningWhisper({
     processing = false;
   };
 
-  // Always record. Voice gating before capture was losing normal Spanish
-  // speech on phone microphones. We filter silent chunks after recording,
-  // while the next chunk is already being captured.
+  const queueUtterance = () => {
+    const chunks = capture.chunks;
+    capture.chunks = [];
+    if (chunks.length) {
+      queue.push(concatFloat32(chunks));
+      void processQueue();
+    }
+    speechActive = false;
+    voicedFor = 0;
+    silenceFor = 0;
+    forceEndCapture = false;
+  };
+
+  // Always record a short pre-roll so we never cut off the first word.
+  // Adaptive thresholds handle quiet phone microphones without transcribing
+  // room noise forever.
   capture.chunks = [];
   capture.on = true;
   onInterim?.('');
@@ -298,25 +369,46 @@ async function keepListeningWhisper({
       try { await media.ctx.resume(); } catch {}
     }
 
-    await sleep(SEGMENT_MS);
-    if (!activeRef.current || myGen !== gen) break;
+    const level = voiceLevel(analyser, levelBuffer);
+    const startThreshold = Math.min(0.02, Math.max(0.004, noiseFloor * 2.4));
+    const endThreshold = Math.min(0.014, Math.max(0.003, noiseFloor * 1.6));
 
-    const chunks = capture.chunks;
-    capture.chunks = [];
-    forceEndCapture = false;
-    if (chunks.length) {
-      queue.push(concatFloat32(chunks));
-      void processQueue();
+    if (!speechActive) {
+      if (forceEndCapture) {
+        capture.chunks = [];
+        forceEndCapture = false;
+      }
+      if (level < startThreshold) {
+        noiseFloor = noiseFloor * 0.96 + level * 0.04;
+        voicedFor = 0;
+        // Keep about one second before speech, discard older silence.
+        if (capture.chunks.length > PRE_ROLL_CHUNKS) {
+          capture.chunks.splice(0, capture.chunks.length - PRE_ROLL_CHUNKS);
+        }
+      } else {
+        voicedFor += POLL_MS;
+        if (voicedFor >= START_MS) {
+          speechActive = true;
+          speechStartedAt = Date.now();
+          silenceFor = 0;
+        }
+      }
+    } else {
+      if (level >= endThreshold) silenceFor = 0;
+      else silenceFor += POLL_MS;
+
+      const utteranceTooLong = Date.now() - speechStartedAt >= MAX_UTTERANCE_MS;
+      if (forceEndCapture || silenceFor >= END_SILENCE_MS || utteranceTooLong) {
+        queueUtterance();
+      }
     }
+
+    await sleep(POLL_MS);
   }
 
   capture.on = false;
-  const finalChunks = capture.chunks;
+  if (speechActive && capture.chunks.length) queueUtterance();
   capture.chunks = [];
-  if (finalChunks.length && activeRef.current && myGen === gen) {
-    queue.push(concatFloat32(finalChunks));
-    await processQueue();
-  }
 }
 
 /**
