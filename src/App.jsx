@@ -239,7 +239,7 @@ export default function App() {
   }, [remember, isRecentDupe]);
 
   const runListenLoop = useCallback(async (lang) => {
-    setListenStatus(`Loading speech engine… (one-time)`);
+    setListenStatus('Starting silent engine…');
     listenLangRef.current = lang;
     setListenLang(lang);
 
@@ -428,7 +428,7 @@ export default function App() {
   }, [addConverseMessage]);
 
   const runConversationLoop = useCallback(async () => {
-    setConverseStatus('Loading speech engine… (one-time)');
+    setConverseStatus('Starting silent engine…');
 
     await keepListening({
       activeRef: converseActiveRef,
