@@ -6,11 +6,119 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="theme-color" content="#f2f2f7" />
-    <title>Language</title>
+    <meta name="description" content="Live conversation translator" />
+    <title>Translator</title>
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌐</text></svg>" />
+    <style>
+      html, body {
+        height: 100%;
+        margin: 0;
+        background: #f2f2f7;
+        color: #1c1c1e;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      }
+      #boot {
+        min-height: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        padding: 32px;
+        text-align: center;
+        box-sizing: border-box;
+      }
+      #boot h1 {
+        font-size: 1.75rem;
+        margin: 0;
+        letter-spacing: -0.03em;
+      }
+      #boot p { margin: 0; color: #8e8e93; font-size: 0.95rem; line-height: 1.4; }
+      #boot button {
+        margin-top: 12px;
+        border: none;
+        border-radius: 14px;
+        background: #007aff;
+        color: #fff;
+        font: inherit;
+        font-weight: 600;
+        font-size: 1rem;
+        padding: 14px 22px;
+        min-width: 200px;
+      }
+      #root:not(:empty) + #boot, #root:not(:empty) ~ #boot { display: none !important; }
+    </style>
   </head>
   <body>
     <div id="root"></div>
+    <div id="boot">
+      <h1>Translator</h1>
+      <p id="boot-msg">Loading…</p>
+      <button id="boot-fix" type="button" hidden>Reload app</button>
+    </div>
+    <script>
+      (function () {
+        var KEY = 'tr_boot_v2';
+        var msg = document.getElementById('boot-msg');
+        var btn = document.getElementById('boot-btn');
+        var root = document.getElementById('root');
+
+        function mounted() {
+          return !!(root && root.childNodes && root.childNodes.length);
+        }
+
+        async function clearAppCaches() {
+          try {
+            if ('serviceWorker' in navigator) {
+              var regs = await navigator.serviceWorker.getRegistrations();
+              await Promise.all(regs.map(function (r) { return r.unregister(); }));
+            }
+          } catch (e) {}
+          try {
+            if (window.caches && caches.keys) {
+              var keys = await caches.keys();
+              await Promise.all(keys.map(function (k) { return caches.delete(k); }));
+            }
+          } catch (e) {}
+        }
+
+        async function recover() {
+          msg.textContent = 'Updating app…';
+          await clearAppCaches();
+          try { sessionStorage.setItem(KEY, '1'); } catch (e) {}
+          // Hard reload to bypass any leftover SW-controlled navigation
+          location.reload(true);
+        }
+
+        btn.addEventListener('click', function () {
+          btn.disabled = true;
+          recover();
+        });
+
+        // If React never mounts, the phone is almost always stuck on a stale service worker.
+        setTimeout(function () {
+          if (mounted()) return;
+          var already = false;
+          try { already = sessionStorage.getItem(KEY) === '1'; } catch (e) {}
+          if (!already) {
+            recover();
+            return;
+          }
+          msg.textContent = 'Couldn’t load. Tap reload — or delete the home-screen icon and open the site again.';
+          btn.hidden = false;
+        }, 2500);
+
+        // Clear the one-shot recovery flag once we successfully mount
+        var obs = new MutationObserver(function () {
+          if (!mounted()) return;
+          try { sessionStorage.removeItem(KEY); } catch (e) {}
+          obs.disconnect();
+          var boot = document.getElementById('boot');
+          if (boot) boot.style.display = 'none';
+        });
+        if (root) obs.observe(root, { childList: true });
+      })();
+    </script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
