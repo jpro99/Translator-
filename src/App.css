@@ -147,6 +147,27 @@ body {
 
 .line-interim { opacity: 0.55; border: 1px dashed var(--sep); box-shadow: none; }
 
+.line-arrow {
+  font-size: 0.8125rem;
+  color: var(--label);
+  margin: 8px 0 4px;
+}
+
+.line-trans {
+  font-size: 1rem;
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--text2);
+}
+
+.line-trans-pending {
+  font-size: 0.875rem;
+  font-weight: 400;
+  color: var(--label);
+  font-style: italic;
+  margin-top: 8px;
+}
+
 .chat {
   background: var(--card);
   border-radius: var(--radius);
@@ -171,6 +192,7 @@ body {
 .chat-said { font-size: 1rem; line-height: 1.4; color: var(--text); }
 .chat-arrow { font-size: 0.875rem; color: var(--label); margin: 6px 0; }
 .chat-trans { font-size: 1.0625rem; font-weight: 500; line-height: 1.4; color: var(--text2); }
+.chat-trans-failed { color: var(--label); font-style: italic; font-weight: 400; }
 
 .action-bar, .turn-bar {
   flex-shrink: 0;
@@ -230,6 +252,42 @@ body {
 @keyframes pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.5; transform: scale(0.85); }
+}
+
+.conv-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 56px;
+  padding: 16px 24px;
+  margin-bottom: 12px;
+  border: none;
+  border-radius: 16px;
+  background: var(--green);
+  color: #fff;
+  font: inherit;
+  font-size: 1.0625rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(52, 199, 89, 0.35);
+  transition: background 0.2s, transform 0.1s;
+}
+
+.conv-btn:active:not(:disabled) { transform: scale(0.98); }
+.conv-btn:disabled { opacity: 0.45; cursor: default; }
+
+.conv-btn-on {
+  background: var(--red);
+  box-shadow: 0 4px 16px rgba(255, 59, 48, 0.35);
+}
+
+.turn-or {
+  text-align: center;
+  font-size: 0.8125rem;
+  color: var(--label);
+  margin-bottom: 10px;
 }
 
 .turn-btns {
