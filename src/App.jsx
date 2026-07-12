@@ -11,7 +11,6 @@ import {
   stopMic,
   restartMic,
   keepListening,
-  detectSpokenLanguage,
 } from './speech';
 
 /* ─── Translation ───────────────────────────────────────────────────── */
@@ -247,10 +246,12 @@ export default function App() {
     await keepListening({
       activeRef: listenActiveRef,
       getLang: () => listenLangRef.current?.speechCode || lang.speechCode,
+      afterSpeechMs: 1100,
+      afterSilenceMs: 2000,
       onInterim: (t) => {
         if (listenActiveRef.current) setListenInterim(t);
       },
-      onFinal: (text) => {
+      onFinal: async (text) => {
         if (!listenActiveRef.current) return;
         const current = listenLangRef.current || lang;
         const guessed = detectLanguageFromText(text);
@@ -261,10 +262,9 @@ export default function App() {
           listenLangRef.current = useLang;
           setListenLang(useLang);
           setListenStatus(`Listening · ${useLang.name} — tap Stop when done`);
-          restartMic(); // soft restart — keepListening stays alive
         }
-        // Don't await — keepListening must stay free
-        addListenLine(text, useLang.key === 'en' ? ENGLISH : useLang);
+        // Fire translation in background — don't block the mic gap
+        void addListenLine(text, useLang.key === 'en' ? ENGLISH : useLang);
       },
       onError: (msg) => {
         setMicError(msg);
@@ -274,7 +274,6 @@ export default function App() {
       },
     });
 
-    // If the loop exited without an explicit stop, keep UI honest
     if (!listenActiveRef.current) {
       setListening(false);
       setListenInterim('');
@@ -290,7 +289,7 @@ export default function App() {
     setDetectingLang(null);
     setListenInterim('');
     setListenStatus('');
-    stopMic();
+    void stopMic();
   }, []);
 
   const toggleListen = useCallback(async () => {
@@ -305,42 +304,25 @@ export default function App() {
 
     converseActiveRef.current = false;
     setConversing(false);
-    stopMic();
+    await stopMic();
 
     setMicError(null);
     listenSeenRef.current.clear();
     recentLockRef.current = [];
+
+    // Don't auto-scan languages — each probe beeps on Android.
+    // Pick once, then Start listens calmly.
+    let lang = listenLangRef.current;
+    if (!lang) {
+      setLangPickerFor('listen');
+      setShowLangPicker(true);
+      setMicError('Pick their language, then tap Start listening.');
+      return;
+    }
+
     listenActiveRef.current = true;
     listenDetectRef.current = true;
     setListening(true);
-
-    let lang = listenLangRef.current;
-
-    if (!lang) {
-      setDetecting(true);
-      setListenStatus('Detecting language… keep talking');
-      const candidates = LANGUAGE_LIST.filter((l) => UNIQUE_SCRIPT_KEYS.has(l.key));
-      lang = await detectSpokenLanguage(
-        candidates,
-        (l) => { if (listenDetectRef.current) setDetectingLang(l); },
-        listenDetectRef,
-      );
-      setDetecting(false);
-      setDetectingLang(null);
-
-      if (!listenActiveRef.current) return;
-
-      if (!lang) {
-        setListening(false);
-        listenActiveRef.current = false;
-        setListenStatus('');
-        setLangPickerFor('listen');
-        setShowLangPicker(true);
-        setMicError('Couldn’t auto-detect. Pick their language, then tap Start again.');
-        return;
-      }
-    }
-
     await runListenLoop(lang);
   }, [listening, detecting, runListenLoop, stopListen]);
 
@@ -349,30 +331,18 @@ export default function App() {
     setLangSearch('');
     setMicError(null);
 
-    if (listenActiveRef.current) {
-      listenLangRef.current = lang;
-      setListenLang(lang);
-      setListenStatus(`Listening · ${lang.name} — tap Stop when done`);
-      restartMic(); // soft restart — keepListening stays alive
-      return;
-    }
-
     listenLangRef.current = lang;
     setListenLang(lang);
 
-    if (!speechSupported()) {
-      setMicError('Use Chrome or Edge for speech recognition.');
+    if (listenActiveRef.current) {
+      setListenStatus(`Listening · ${lang.name} — tap Stop when done`);
+      restartMic();
       return;
     }
 
-    converseActiveRef.current = false;
-    setConversing(false);
-    stopMic();
-
-    listenActiveRef.current = true;
-    setListening(true);
-    await runListenLoop(lang);
-  }, [runListenLoop]);
+    // Choosing a language shouldn't auto-start — user taps Start.
+    // Unless they came from the Start flow toast.
+  }, []);
 
   /* ── Conversation mode ── */
   const stopConverse = useCallback(() => {
@@ -380,7 +350,7 @@ export default function App() {
     setConversing(false);
     setTurnInterim('');
     setConverseStatus('');
-    stopMic();
+    void stopMic();
   }, []);
 
   const addConverseMessage = useCallback(async (who, said, fromCode, toCode, speakLang) => {
@@ -400,7 +370,7 @@ export default function App() {
     if (translated && translated !== said) speak(translated, speakLang);
   }, [remember, speak, isRecentDupe]);
 
-  const handleConverseFinal = useCallback((text) => {
+  const handleConverseFinal = useCallback(async (text) => {
     if (!converseActiveRef.current) return;
     const lang = languageRef.current;
     const focus = converseFocusRef.current;
@@ -408,37 +378,28 @@ export default function App() {
 
     if (listeningForYou) {
       if (!isEnglish(text) && looksLikeForeign(text, lang)) {
-        addConverseMessage('them', text, lang.apiCode, 'en', ENGLISH.speechCode);
-        // Stay on You unless they clearly spoke — then switch to Them next? Prefer switch after them
-        converseFocusRef.current = 'you';
-        setConverseFocus('you');
-      } else {
-        addConverseMessage('you', text, 'en', lang.apiCode, lang.speechCode);
-        // After you speak, listen for them
-        converseFocusRef.current = 'them';
-        setConverseFocus('them');
-        setConverseStatus(`Listening for ${lang.name} — tap Stop when done`);
-        restartMic(); // soft restart in their language
+        void addConverseMessage('them', text, lang.apiCode, 'en', ENGLISH.speechCode);
+        return;
       }
+      void addConverseMessage('you', text, 'en', lang.apiCode, lang.speechCode);
+      converseFocusRef.current = 'them';
+      setConverseFocus('them');
+      setConverseStatus(`Listening for ${lang.name} — tap Stop when done`);
       return;
     }
 
     // Listening for them
     if (isEnglish(text) && !looksLikeForeign(text, lang)) {
-      addConverseMessage('you', text, 'en', lang.apiCode, lang.speechCode);
-      converseFocusRef.current = 'them';
-      setConverseFocus('them');
+      void addConverseMessage('you', text, 'en', lang.apiCode, lang.speechCode);
       return;
     }
 
     if (looksLikeForeign(text, lang) || !UNIQUE_SCRIPT_KEYS.has(lang.key)) {
-      addConverseMessage('them', text, lang.apiCode, 'en', ENGLISH.speechCode);
+      void addConverseMessage('them', text, lang.apiCode, 'en', ENGLISH.speechCode);
       converseFocusRef.current = 'you';
       setConverseFocus('you');
       setConverseStatus('Listening for English — tap Stop when done');
-      restartMic(); // soft restart in English
     }
-    // else: unique-script garbage — ignore, keep listening
   }, [addConverseMessage]);
 
   const runConversationLoop = useCallback(async () => {
@@ -451,6 +412,8 @@ export default function App() {
           ? ENGLISH.speechCode
           : (languageRef.current?.speechCode || 'en-US')
       ),
+      afterSpeechMs: 1100,
+      afterSilenceMs: 2000,
       onInterim: (t) => {
         if (converseActiveRef.current) setTurnInterim(t);
       },
@@ -481,6 +444,7 @@ export default function App() {
     }
 
     stopListen();
+    await stopMic();
 
     setMicError(null);
     seenRef.current.clear();
@@ -503,7 +467,7 @@ export default function App() {
         : `Listening for ${lang.name} — tap Stop when done`,
     );
     setTurnInterim('');
-    if (converseActiveRef.current) restartMic(); // soft restart with new lang
+    if (converseActiveRef.current) restartMic();
   }, []);
 
   /* ── Language picker ── */
@@ -548,18 +512,18 @@ export default function App() {
               <div>
                 <h1 className="header-title">Listen</h1>
                 <p className="header-sub">Overhear → English translation</p>
-                {listenLang && (
-                  <button
-                    type="button"
-                    className="lang-chip"
-                    onClick={() => {
-                      setLangPickerFor('listen');
-                      setShowLangPicker(true);
-                    }}
-                  >
-                    {listenLang.flag} {listenLang.name} ▾
-                  </button>
-                )}
+                <button
+                  type="button"
+                  className="lang-chip"
+                  onClick={() => {
+                    setLangPickerFor('listen');
+                    setShowLangPicker(true);
+                  }}
+                >
+                  {listenLang
+                    ? `${listenLang.flag} ${listenLang.name} ▾`
+                    : 'Pick language ▾'}
+                </button>
               </div>
             </header>
 
@@ -567,8 +531,8 @@ export default function App() {
               {listenLines.length === 0 && !listenInterim && !detecting && (
                 <div className="empty">
                   <span className="empty-icon">👂</span>
-                  <p>Tap Start. Keeps listening through pauses — only Stop ends it.</p>
-                  <p className="empty-note">You don’t speak — hold the phone near them.</p>
+                  <p>Pick their language, then tap Start. Speak a phrase — you’ll see it translated.</p>
+                  <p className="empty-note">One calm listen at a time (no beep loop). Tap Stop when finished.</p>
                 </div>
               )}
 

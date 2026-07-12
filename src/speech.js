@@ -1,203 +1,241 @@
-/** Keep-alive speech recognition — restarts on silence until Stop is pressed. */
+/**
+ * Android-safe speech recognition.
+ * One session at a time. continuous=false (Chrome mobile beeps on every start,
+ * so we must NOT rapid-restart). Keeps looping until Stop — with calm gaps.
+ */
 
-let activeRec = null;
-let hardStop = false;
+let gen = 0;
+let active = null; // { rec, finish, ended }
 
-export function speechSupported() {
-  return !!(window.SpeechRecognition || window.webkitSpeechRecognition);
-}
-
-/** Abort the current recognition engine only. The keep-alive loop continues. */
-export function restartMic() {
-  const rec = activeRec;
-  activeRec = null;
-  if (!rec) return;
-  try { rec.abort(); } catch {}
-}
-
-/** Hard-stop: ends keepListening loops. Only call from Stop / tab switch. */
-export function stopMic() {
-  hardStop = true;
-  restartMic();
-}
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function getSR() {
   return window.SpeechRecognition || window.webkitSpeechRecognition || null;
 }
 
-/**
- * Continuous listen that keeps restarting through pauses.
- * Stops only when activeRef.current becomes false or stopMic() is called.
- */
-export async function keepListening({ activeRef, getLang, onInterim, onFinal, onError }) {
+export function speechSupported() {
+  return !!getSR();
+}
+
+function clearHandlers(rec) {
+  if (!rec) return;
+  rec.onstart = null;
+  rec.onresult = null;
+  rec.onspeechend = null;
+  rec.onnomatch = null;
+  rec.onerror = null;
+  rec.onend = null;
+}
+
+function makeRec(lang) {
   const SR = getSR();
-  if (!SR) {
-    onError?.('Use Chrome or Edge for speech recognition.');
-    return;
-  }
+  if (!SR) return null;
+  const rec = new SR();
+  rec.lang = lang || 'en-US';
+  // continuous=true causes constant start/stop beeps on Android Chrome
+  rec.continuous = false;
+  rec.interimResults = true;
+  rec.maxAlternatives = 1;
+  return rec;
+}
 
-  hardStop = false;
-
-  const shouldRun = () => activeRef.current && !hardStop;
-
-  while (shouldRun()) {
-    const lang = getLang() || 'en-US';
-    let gotSpeech = false;
-    let restartDelay = 100;
-
-    await new Promise((resolve) => {
-      if (!shouldRun()) {
-        resolve();
-        return;
-      }
-
-      let settled = false;
-      let rec = null;
-
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        if (activeRec === rec) activeRec = null;
-        resolve();
-      };
-
-      try {
-        rec = new SR();
-      } catch {
-        finish();
-        return;
-      }
-
-      activeRec = rec;
-      rec.lang = lang;
-      rec.continuous = true;
-      rec.interimResults = true;
-      rec.maxAlternatives = 1;
-
-      rec.onresult = (event) => {
-        if (!shouldRun()) return;
-        gotSpeech = true;
-
-        let interim = '';
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const result = event.results[i];
-          const text = (result[0]?.transcript || '').trim();
-          if (!text) continue;
-          if (result.isFinal) {
-            Promise.resolve(onFinal?.(text)).catch(() => {});
-          } else {
-            interim = text;
-          }
-        }
-        if (interim) onInterim?.(interim);
-      };
-
-      rec.onerror = (e) => {
-        const err = e?.error || '';
-        if (err === 'no-speech' || err === 'aborted' || err === 'speech-timeout') {
-          restartDelay = 60;
-          return;
-        }
-        if (err === 'not-allowed') {
-          onError?.('Microphone access denied — allow it in browser settings.');
-          activeRef.current = false;
-          hardStop = true;
-          finish();
-          return;
-        }
-        if (err === 'audio-capture') {
-          onError?.('No microphone found.');
-          activeRef.current = false;
-          hardStop = true;
-          finish();
-          return;
-        }
-        restartDelay = err === 'network' ? 1200 : 350;
-      };
-
-      // When restartMic() nulls onend before abort, we still need to finish.
-      // So wrap: if handlers cleared, poll briefly.
-      rec.onend = () => finish();
-
-      try {
-        rec.start();
-      } catch {
-        restartDelay = 350;
-        finish();
-      }
-    });
-
-    if (!shouldRun()) break;
-    await sleep(gotSpeech ? 60 : restartDelay);
+/** Soft-stop current utterance so the outer loop can restart with a new language. */
+export function restartMic() {
+  const session = active;
+  if (!session) return;
+  try {
+    session.rec.stop();
+  } catch {
+    try { session.rec.abort(); } catch {
+      session.finish(null);
+    }
   }
 }
 
-/** Probe whether the given language is being spoken right now. */
-export function probeLanguage(lang, timeoutMs = 3500) {
-  const SR = getSR();
-  if (!SR) return Promise.resolve(null);
+/** Hard-stop — ends listen loops. Call from Stop / tab switch. */
+export async function stopMic() {
+  gen += 1;
+  const session = active;
+  if (!session) return;
+
+  try {
+    session.rec.stop();
+  } catch {
+    try { session.rec.abort(); } catch {
+      session.finish(null);
+    }
+  }
+
+  await Promise.race([session.ended, sleep(800)]);
+  if (active === session) {
+    clearHandlers(session.rec);
+    active = null;
+    session.finish(null);
+  }
+  // Android needs a gap before the next start()
+  await sleep(250);
+}
+
+async function waitUntilIdle(myGen) {
+  while (active) {
+    if (myGen !== gen) return false;
+    await Promise.race([active.ended, sleep(500)]);
+    if (active) await sleep(120);
+  }
+  if (myGen !== gen) return false;
+  await sleep(200);
+  return myGen === gen;
+}
+
+/**
+ * Listen for a single utterance. Resolves transcript or null.
+ */
+export async function listenOnce({ lang, onInterim, timeoutMs = 15000 } = {}) {
+  if (!speechSupported()) return null;
+
+  const myGen = gen;
+  const ready = await waitUntilIdle(myGen);
+  if (!ready) return null;
 
   return new Promise((resolve) => {
-    hardStop = false;
-    let settled = false;
-    let rec = null;
-
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (activeRec === rec) activeRec = null;
-      try {
-        if (rec) {
-          rec.onresult = null;
-          rec.onerror = null;
-          rec.onend = null;
-          rec.abort();
-        }
-      } catch {}
-      resolve(result);
-    };
-
-    try {
-      rec = new SR();
-    } catch {
-      finish(null);
+    if (myGen !== gen || active) {
+      resolve(null);
       return;
     }
 
-    activeRec = rec;
-    rec.lang = lang.speechCode;
-    rec.continuous = false;
-    rec.interimResults = false;
-    rec.maxAlternatives = 1;
+    let settled = false;
+    let endResolve;
+    const ended = new Promise((r) => { endResolve = r; });
 
-    const timer = setTimeout(() => finish(null), timeoutMs);
-
-    rec.onresult = (e) => {
-      const alt = e.results[0]?.[0];
-      const t = alt?.transcript?.trim() ?? '';
-      const conf = alt?.confidence ?? 1;
-      if (!t || conf < 0.4) return finish(null);
-
-      let match = lang.isMine?.(t);
-      if (lang.key === 'ja' && match) {
-        const hasHiragana = /[ぁ-ん]/.test(t);
-        const hasKanji = /[一-鿿]/.test(t);
-        if (!hasHiragana && !hasKanji) match = false;
-      }
-      finish(match ? { lang, text: t } : null);
+    const finish = (text) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (active?.rec === rec) active = null;
+      clearHandlers(rec);
+      endResolve();
+      resolve(text);
     };
 
-    rec.onerror = () => finish(null);
-    rec.onend = () => { if (!settled) finish(null); };
+    const rec = makeRec(lang);
+    if (!rec) {
+      resolve(null);
+      return;
+    }
+
+    active = { rec, finish, ended };
+
+    const timer = setTimeout(() => {
+      try { rec.stop(); } catch { finish(null); }
+    }, timeoutMs);
+
+    rec.onresult = (event) => {
+      if (myGen !== gen) return;
+      let interim = '';
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        const text = (result[0]?.transcript || '').trim();
+        if (!text) continue;
+        if (result.isFinal) {
+          finish(text);
+          try { rec.stop(); } catch {}
+          return;
+        }
+        interim = text;
+      }
+      if (interim) onInterim?.(interim);
+    };
+
+    rec.onerror = (event) => {
+      // Normal on mobile — let onend settle
+      if (event.error === 'aborted' || event.error === 'no-speech') return;
+      finish(null);
+    };
+
+    rec.onend = () => {
+      if (!settled) finish(null);
+      else endResolve();
+    };
 
     try {
       rec.start();
     } catch {
       finish(null);
     }
+  });
+}
+
+/**
+ * Keep listening until activeRef is false / stopMic().
+ * Uses calm gaps so Android doesn't beep-loop.
+ *   - after speech: ~1.2s
+ *   - after silence: ~2.2s
+ */
+export async function keepListening({
+  activeRef,
+  getLang,
+  onInterim,
+  onFinal,
+  onError,
+  afterSpeechMs = 1200,
+  afterSilenceMs = 2200,
+}) {
+  if (!speechSupported()) {
+    onError?.('Use Chrome or Edge for speech recognition.');
+    return;
+  }
+
+  const myGen = ++gen;
+
+  while (activeRef.current && myGen === gen) {
+    const lang = (typeof getLang === 'function' ? getLang() : getLang) || 'en-US';
+
+    let text = null;
+    try {
+      text = await listenOnce({
+        lang,
+        onInterim: activeRef.current && myGen === gen ? onInterim : undefined,
+      });
+    } catch {
+      if (!activeRef.current || myGen !== gen) break;
+      await sleep(1500);
+      continue;
+    }
+
+    if (!activeRef.current || myGen !== gen) break;
+
+    if (text) {
+      try {
+        // Await so we don't immediately re-open the mic over ourselves,
+        // but onFinal should still be fast (fire translation without blocking).
+        await onFinal?.(text);
+      } catch {}
+      if (!activeRef.current || myGen !== gen) break;
+      await sleep(afterSpeechMs);
+    } else {
+      // Silence — stay "listening" in the UI, just don't beep every 60ms
+      await sleep(afterSilenceMs);
+    }
+  }
+}
+
+/** Back-compat alias */
+export const listenLoop = keepListening;
+
+/**
+ * One-shot language probe. Prefer picking a language in the UI instead —
+ * scanning many languages causes a beep storm on Android.
+ */
+export function probeLanguage(lang, timeoutMs = 4000) {
+  return listenOnce({ lang: lang.speechCode, timeoutMs }).then((text) => {
+    if (!text) return null;
+    let match = lang.isMine?.(text);
+    if (lang.key === 'ja' && match) {
+      const hasHiragana = /[ぁ-ん]/.test(text);
+      const hasKanji = /[一-鿿]/.test(text);
+      if (!hasHiragana && !hasKanji) match = false;
+    }
+    return match ? { lang, text } : null;
   });
 }
 
@@ -208,9 +246,7 @@ export async function detectSpokenLanguage(candidates, onTrying, cancelRef) {
     const hit = await probeLanguage(lang);
     if (cancelRef && !cancelRef.current) return null;
     if (hit) return hit.lang;
-    await sleep(200);
+    await sleep(500);
   }
   return null;
 }
-
-export { sleep };
