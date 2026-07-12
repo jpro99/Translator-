@@ -3,7 +3,8 @@ import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig({
-  base: process.env.GITHUB_ACTIONS ? '/Translator-/' : '/',
+  // GitHub Pages serves under /Translator-/; Vercel / local use root.
+  base: process.env.VERCEL ? '/' : (process.env.GITHUB_ACTIONS ? '/Translator-/' : '/'),
   plugins: [
     react(),
     VitePWA({

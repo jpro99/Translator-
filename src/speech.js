@@ -1,25 +1,37 @@
-/** Single mic session — avoids overlapping recognizers and duplicate beeps. */
-let busy = false;
-let activeRec = null;
+/**
+ * Crash-safe speech recognition for Chrome (esp. Android).
+ * One session at a time; stop waits for native teardown; generation
+ * tokens ignore stale callbacks so loops never overlap or hang.
+ */
+
+let gen = 0;
+let active = null; // { rec, finish, ended }
+
+export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function getSR() {
+  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
 
 export function speechSupported() {
-  return !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  return !!getSR();
 }
 
-export function stopMic() {
-  const rec = activeRec;
-  busy = false;
-  activeRec = null;
-  try { rec?.abort(); } catch {}
+function clearHandlers(rec) {
+  if (!rec) return;
+  rec.onstart = null;
+  rec.onresult = null;
+  rec.onspeechend = null;
+  rec.onnomatch = null;
+  rec.onerror = null;
+  rec.onend = null;
 }
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function makeRec(lang) {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const SR = getSR();
   if (!SR) return null;
   const rec = new SR();
-  rec.lang = lang;
+  rec.lang = lang || 'en-US';
   rec.continuous = false;
   rec.interimResults = true;
   rec.maxAlternatives = 1;
@@ -27,59 +39,125 @@ function makeRec(lang) {
 }
 
 /**
- * Listen for a single utterance. Resolves transcript or null.
- * @param {{ lang: string, onInterim?: (t: string) => void, timeoutMs?: number }} opts
+ * Hard-stop the mic and wait until the native session is gone.
+ * Safe to call repeatedly (including without await).
  */
-export function listenOnce({ lang, onInterim, timeoutMs = 12000 }) {
-  if (!speechSupported() || busy) return Promise.resolve(null);
+export async function stopMic() {
+  gen += 1;
+  const session = active;
+  if (!session) return;
+
+  try {
+    session.rec.stop();
+  } catch {
+    try {
+      session.rec.abort();
+    } catch {
+      session.finish(null);
+    }
+  }
+
+  await Promise.race([session.ended, sleep(800)]);
+  if (active === session) {
+    clearHandlers(session.rec);
+    active = null;
+    session.finish(null);
+  }
+  // Android Chrome needs a short gap before the next start().
+  await sleep(220);
+}
+
+/**
+ * Wait until any in-flight session has fully ended.
+ */
+async function waitUntilIdle(myGen) {
+  while (active) {
+    if (myGen !== gen) return false;
+    await Promise.race([active.ended, sleep(500)]);
+    if (active) await sleep(100);
+  }
+  if (myGen !== gen) return false;
+  await sleep(180);
+  return myGen === gen;
+}
+
+/**
+ * Listen for a single utterance. Resolves transcript string or null.
+ * Never leaves the mic stuck; always settles.
+ */
+export async function listenOnce({ lang, onInterim, timeoutMs = 12000 } = {}) {
+  if (!speechSupported()) return null;
+
+  const myGen = gen;
+  const ready = await waitUntilIdle(myGen);
+  if (!ready) return null;
 
   return new Promise((resolve) => {
-    busy = true;
-    let settled = false;
-    const rec = makeRec(lang);
-    if (!rec) {
-      busy = false;
+    if (myGen !== gen || active) {
       resolve(null);
       return;
     }
-    activeRec = rec;
+
+    let settled = false;
+    let endResolve;
+    const ended = new Promise((r) => {
+      endResolve = r;
+    });
 
     const finish = (text) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (activeRec === rec) {
-        activeRec = null;
-        busy = false;
-      }
+      if (active?.rec === rec) active = null;
+      clearHandlers(rec);
+      endResolve();
       resolve(text);
     };
 
+    const rec = makeRec(lang);
+    if (!rec) {
+      resolve(null);
+      return;
+    }
+
+    active = { rec, finish, ended };
+
     const timer = setTimeout(() => {
-      try { rec.stop(); } catch {}
-      setTimeout(() => finish(null), 400);
+      try {
+        rec.stop();
+      } catch {
+        finish(null);
+      }
     }, timeoutMs);
 
-    rec.onresult = (e) => {
-      const r = e.results[e.results.length - 1];
-      const text = r[0]?.transcript ?? '';
-      if (!r.isFinal) {
-        onInterim?.(text);
-        return;
+    rec.onresult = (event) => {
+      if (myGen !== gen) return;
+      let interim = '';
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        const text = (result[0]?.transcript || '').trim();
+        if (!text) continue;
+        if (result.isFinal) {
+          finish(text);
+          try {
+            rec.stop();
+          } catch {}
+          return;
+        }
+        interim = text;
       }
-      finish(text.trim() || null);
+      if (interim) onInterim?.(interim);
     };
 
-    rec.onerror = (e) => {
-      if (e.error === 'aborted') {
-        finish(null);
-        return;
-      }
+    rec.onerror = (event) => {
+      // no-speech / aborted are normal on mobile — onend settles.
+      if (event.error === 'aborted' || event.error === 'no-speech') return;
       finish(null);
     };
 
     rec.onend = () => {
       if (!settled) finish(null);
+      else endResolve();
     };
 
     try {
@@ -92,61 +170,97 @@ export function listenOnce({ lang, onInterim, timeoutMs = 12000 }) {
 
 /**
  * Passive listen loop — one phrase at a time with a short gap between sessions.
+ * onLine may be async; mic stays off until it finishes.
  */
-export async function listenLoop({ activeRef, langRef, gapMs = 600, onInterim, onLine }) {
-  while (activeRef.current) {
+export async function listenLoop({
+  activeRef,
+  langRef,
+  gapMs = 600,
+  onInterim,
+  onLine,
+}) {
+  const myGen = ++gen;
+
+  while (activeRef.current && myGen === gen) {
     const lang = typeof langRef === 'function'
       ? langRef()
       : (langRef.current?.speechCode || langRef.current);
-    const text = await listenOnce({
-      lang,
-      onInterim: activeRef.current ? onInterim : undefined,
-    });
-    if (!activeRef.current) break;
+
+    let text = null;
+    try {
+      text = await listenOnce({
+        lang,
+        onInterim: activeRef.current && myGen === gen ? onInterim : undefined,
+      });
+    } catch {
+      await sleep(500);
+      continue;
+    }
+
+    if (!activeRef.current || myGen !== gen) break;
+
     if (text) {
       try {
         await onLine(text);
       } catch {}
     }
+
+    if (!activeRef.current || myGen !== gen) break;
     await sleep(gapMs);
   }
 }
 
 /**
  * Probe whether the given language is being spoken right now.
- * Used for auto language detection (unique-script languages).
  */
-export function probeLanguage(lang, timeoutMs = 3500) {
-  if (!speechSupported() || busy) return Promise.resolve(null);
+export async function probeLanguage(lang, timeoutMs = 3500) {
+  if (!speechSupported()) return null;
+
+  const myGen = gen;
+  const ready = await waitUntilIdle(myGen);
+  if (!ready) return null;
 
   return new Promise((resolve) => {
-    busy = true;
-    let settled = false;
-    const rec = makeRec(lang.speechCode);
-    if (!rec) {
-      busy = false;
+    if (myGen !== gen || active) {
       resolve(null);
       return;
     }
-    activeRec = rec;
+
+    let settled = false;
+    let endResolve;
+    const ended = new Promise((r) => {
+      endResolve = r;
+    });
 
     const finish = (result) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (activeRec === rec) {
-        activeRec = null;
-        busy = false;
-      }
+      if (active?.rec === rec) active = null;
+      clearHandlers(rec);
+      endResolve();
       resolve(result);
     };
 
+    const rec = makeRec(lang.speechCode);
+    if (!rec) {
+      resolve(null);
+      return;
+    }
+
+    active = { rec, finish, ended };
+    rec.interimResults = false;
+
     const timer = setTimeout(() => {
-      try { rec.stop(); } catch {}
-      setTimeout(() => finish(null), 300);
+      try {
+        rec.stop();
+      } catch {
+        finish(null);
+      }
     }, timeoutMs);
 
     rec.onresult = (e) => {
+      if (myGen !== gen) return;
       const alt = e.results[0]?.[0];
       const t = alt?.transcript?.trim() ?? '';
       const conf = alt?.confidence ?? 1;
@@ -164,9 +278,14 @@ export function probeLanguage(lang, timeoutMs = 3500) {
       finish(match ? { lang, text: t } : null);
     };
 
-    rec.onerror = () => finish(null);
+    rec.onerror = (event) => {
+      if (event.error === 'aborted' || event.error === 'no-speech') return;
+      finish(null);
+    };
+
     rec.onend = () => {
       if (!settled) finish(null);
+      else endResolve();
     };
 
     try {
@@ -179,8 +298,6 @@ export function probeLanguage(lang, timeoutMs = 3500) {
 
 /**
  * Scan unique-script languages until one matches spoken audio.
- * @param {(lang) => void} onTrying - called as each candidate is probed
- * @param {{ current: boolean }} cancelRef - set current=false to abort
  */
 export async function detectSpokenLanguage(candidates, onTrying, cancelRef) {
   for (const lang of candidates) {
@@ -193,5 +310,3 @@ export async function detectSpokenLanguage(candidates, onTrying, cancelRef) {
   }
   return null;
 }
-
-export { sleep };

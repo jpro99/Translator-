@@ -28,36 +28,42 @@ function persistCache() {
 }
 
 async function translate(text, from, to) {
-  if (!text?.trim() || from === to) return text;
+  if (!text?.trim()) return null;
+  if (from !== 'auto' && from === to) return text;
   const key = `${text}|${from}|${to}`;
   if (translationCache.has(key)) return translationCache.get(key);
   const save = (r) => { translationCache.set(key, r); persistCache(); return r; };
   const differs = (r) => r && r.trim().toLowerCase() !== text.trim().toLowerCase();
 
-  // Google translate (unofficial, reliable for short phrases)
+  // Google translate (unofficial, reliable for short phrases; supports auto)
   try {
-    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(from)}&tl=${encodeURIComponent(to)}&dt=t&q=${encodeURIComponent(text)}`;
+    const sl = from === 'auto' ? 'auto' : from;
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(sl)}&tl=${encodeURIComponent(to)}&dt=t&q=${encodeURIComponent(text)}`;
     const res = await fetch(url);
     const data = await res.json();
     const r = Array.isArray(data?.[0])
       ? data[0].filter(Boolean).map((p) => p?.[0]).join('')
       : '';
-    if (differs(r)) return save(r);
+    if (r && (from === 'auto' || differs(r) || r.trim())) return save(r.trim());
   } catch {}
 
   try {
-    const res = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${from}|${to}`);
+    const pair = `${from === 'auto' ? 'Autodetect' : from}|${to}`;
+    const res = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${pair}`);
     const data = await res.json();
     if (data.responseStatus === 200) {
       const r = data.responseData.translatedText;
       if (differs(r)) return save(r);
+      if (r) return save(r);
     }
   } catch {}
 
   try {
-    const res = await fetch(`https://lingva.ml/api/v1/${from}/${to}/${encodeURIComponent(text)}`);
+    const sl = from === 'auto' ? 'auto' : from;
+    const res = await fetch(`https://lingva.ml/api/v1/${sl}/${to}/${encodeURIComponent(text)}`);
     const data = await res.json();
     if (differs(data.translation)) return save(data.translation);
+    if (data.translation) return save(data.translation);
   } catch {}
 
   return null;
@@ -162,12 +168,21 @@ export default function App() {
   }, []);
 
   const speak = useCallback((text, langCode) => {
-    if (!ttsOn || !text || !window.speechSynthesis) return;
-    window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = langCode;
-    u.rate = 0.92;
-    window.speechSynthesis.speak(u);
+    return new Promise((resolve) => {
+      if (!ttsOn || !text || !window.speechSynthesis) {
+        resolve();
+        return;
+      }
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = langCode;
+      u.rate = 0.92;
+      const done = () => resolve();
+      u.onend = done;
+      u.onerror = done;
+      window.speechSynthesis.speak(u);
+      setTimeout(done, Math.min(12000, 800 + text.length * 80));
+    });
   }, [ttsOn]);
 
   /* ── Listen: capture → detect language → translate to English ── */
@@ -181,7 +196,9 @@ export default function App() {
     }]);
     setListenInterim('');
 
-    const toEn = lang.key === 'en' ? text : await translate(text, lang.apiCode, 'en');
+    const toEn = lang.key === 'en'
+      ? text
+      : (await translate(text, lang.apiCode, 'en')) || (await translate(text, 'auto', 'en'));
     setListenLines((prev) => prev.map((line) => (
       line.id === id
         ? { ...line, translation: toEn || '(translation unavailable)', translating: false }
@@ -329,13 +346,14 @@ export default function App() {
     }]);
     setTurnInterim('');
 
-    const translated = await translate(said, fromCode, toCode);
+    const translated = await translate(said, fromCode, toCode)
+      || (toCode === 'en' ? await translate(said, 'auto', 'en') : null);
     setMessages((prev) => prev.map((m) => (
       m.id === id
         ? { ...m, translation: translated || '(translation unavailable)', translating: false }
         : m
     )));
-    if (translated) speak(translated, speakLang);
+    if (translated) await speak(translated, speakLang);
   }, [remember, speak]);
 
   const runConversationLoop = useCallback(async () => {
