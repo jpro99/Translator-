@@ -145,6 +145,13 @@ body {
   color: var(--text);
 }
 
+.line-trans {
+  font-size: 1.0625rem;
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--text2);
+}
+
 .line-interim { opacity: 0.55; border: 1px dashed var(--sep); box-shadow: none; }
 
 .chat {
@@ -375,6 +382,7 @@ body {
 }
 
 .lang-row-on { background: var(--blue-soft); color: var(--blue); font-weight: 600; }
+.lang-auto { margin: 0 8px 8px; border-radius: 12px; }
 .lang-native { margin-left: auto; font-size: 0.875rem; color: var(--label); }
 
 .toast {

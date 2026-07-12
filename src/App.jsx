@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { LANGUAGE_LIST, ENGLISH, detectLanguageFromText } from './languages';
-import { speechSupported, stopMic, listenOnce, listenLoop } from './speech';
+import { LANGUAGE_LIST, ENGLISH, detectLanguageFromText, isEnglish } from './languages';
+import { speechSupported, stopMic, listenContinuous } from './speech';
 
 /* ─── Translation cache ─────────────────────────────────────────────── */
 const _cacheInit = (() => {
@@ -14,6 +14,22 @@ function persistCache() {
   } catch {}
 }
 
+function googleLang(code) {
+  if (code === 'zh') return 'zh-CN';
+  return code;
+}
+
+async function translateGoogle(text, from, to) {
+  const sl = googleLang(from);
+  const tl = googleLang(to);
+  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${sl}&tl=${tl}&dt=t&q=${encodeURIComponent(text)}`;
+  const res = await fetch(url);
+  if (!res.ok) return null;
+  const data = await res.json();
+  const parts = data?.[0]?.map((row) => row?.[0]).filter(Boolean);
+  return parts?.join('') || null;
+}
+
 async function translate(text, from, to) {
   if (!text.trim() || from === to) return text;
   const key = `${text}|${from}|${to}`;
@@ -21,14 +37,13 @@ async function translate(text, from, to) {
   const save = (r) => { translationCache.set(key, r); persistCache(); return r; };
   const differs = (r) => r && r.trim().toLowerCase() !== text.trim().toLowerCase();
   try {
+    const g = await translateGoogle(text, from, to);
+    if (differs(g)) return save(g);
+  } catch {}
+  try {
     const res = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${from}|${to}`);
     const data = await res.json();
     if (data.responseStatus === 200) { const r = data.responseData.translatedText; if (differs(r)) return save(r); }
-  } catch {}
-  try {
-    const res = await fetch(`https://lingva.ml/api/v1/${from}/${to}/${encodeURIComponent(text)}`);
-    const data = await res.json();
-    if (differs(data.translation)) return save(data.translation);
   } catch {}
   return null;
 }
@@ -45,56 +60,75 @@ function formatTime(d = new Date()) {
   return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
+function classifySpeaker(text, otherLang) {
+  if (isEnglish(text)) return 'you';
+  const detected = detectLanguageFromText(text);
+  if (detected?.key === 'en') return 'you';
+  if (detected?.key === otherLang.key) return 'them';
+  if (otherLang.isMine?.(text)) return 'them';
+  if (detected?.key && detected.key !== '?' && detected.key !== 'en') return 'them';
+  return 'them';
+}
+
+function resolveLang(text, fallback) {
+  return detectLanguageFromText(text) || fallback;
+}
+
 /* ─── App ───────────────────────────────────────────────────────────── */
 export default function App() {
   const [tab, setTab] = useState('listen');
 
-  /* Listen tab */
-  const [listening, setListening] = useState(false);
-  const [listenLines, setListenLines] = useState([]);
-  const [listenInterim, setListenInterim] = useState('');
-  const listenActiveRef = useRef(false);
-  const listenLangRef = useRef(ENGLISH);
-  const listenSeenRef = useRef(new Set());
-
-  /* Translate tab */
+  /* Shared other language */
   const [language, setLanguage] = useState(() =>
     LANGUAGE_LIST.find(l => l.key === 'ja') || LANGUAGE_LIST[0]
   );
   const [showLangPicker, setShowLangPicker] = useState(false);
   const [langSearch, setLangSearch] = useState('');
-  const [messages, setMessages] = useState([]);
-  const [turn, setTurn] = useState(null); // 'you' | 'them' | null
-  const [turnInterim, setTurnInterim] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [ttsOn, setTtsOn] = useState(false);
+  const [autoDetect, setAutoDetect] = useState(true);
   const [micError, setMicError] = useState(null);
+
+  /* Listen tab */
+  const [listening, setListening] = useState(false);
+  const [listenLines, setListenLines] = useState([]);
+  const [listenInterim, setListenInterim] = useState('');
+  const [listenInterimTrans, setListenInterimTrans] = useState('');
+  const listenActiveRef = useRef(false);
+  const listenLangRef = useRef(language);
+  const listenSeenRef = useRef(new Set());
+  const listenTransTimerRef = useRef(null);
+
+  /* Conversation tab */
+  const [conversing, setConversing] = useState(false);
+  const [messages, setMessages] = useState([]);
+  const [convInterim, setConvInterim] = useState('');
+  const [convInterimTrans, setConvInterimTrans] = useState('');
+  const [convInterimWho, setConvInterimWho] = useState(null);
+  const [ttsOn, setTtsOn] = useState(false);
+  const convActiveRef = useRef(false);
+  const convLangRef = useRef(ENGLISH);
+  const convSeenRef = useRef(new Set());
+  const convTransTimerRef = useRef(null);
 
   const listEndRef = useRef(null);
   const chatEndRef = useRef(null);
-  const seenRef = useRef(new Set());
-  const lockUntilRef = useRef(0);
 
   useEffect(() => {
     listEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [listenLines, listenInterim]);
+  }, [listenLines, listenInterim, listenInterimTrans]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, turnInterim]);
+  }, [messages, convInterim, convInterimTrans]);
 
-  useEffect(() => () => stopMic(), []);
-
-  const remember = useCallback((text) => {
-    const n = norm(text);
-    if (!n || seenRef.current.has(n)) return false;
-    seenRef.current.add(n);
-    if (seenRef.current.size > 40) {
-      seenRef.current = new Set([...seenRef.current].slice(-20));
-    }
-    lockUntilRef.current = Date.now() + 8000;
-    return true;
+  useEffect(() => () => {
+    stopMic();
+    clearTimeout(listenTransTimerRef.current);
+    clearTimeout(convTransTimerRef.current);
   }, []);
+
+  useEffect(() => {
+    if (!autoDetect) listenLangRef.current = language;
+  }, [language, autoDetect]);
 
   const speak = useCallback((text, langCode) => {
     if (!ttsOn || !text || !window.speechSynthesis) return;
@@ -105,19 +139,67 @@ export default function App() {
     window.speechSynthesis.speak(u);
   }, [ttsOn]);
 
-  /* ── Listen tab: one toggle, one line at a time ── */
-  const addListenLine = useCallback((text) => {
+  const remember = useCallback((text, seenRef) => {
     const n = norm(text);
-    if (!n || listenSeenRef.current.has(n)) return;
-    listenSeenRef.current.add(n);
-    if (listenSeenRef.current.size > 50) {
-      listenSeenRef.current = new Set([...listenSeenRef.current].slice(-25));
+    if (!n || seenRef.current.has(n)) return false;
+    seenRef.current.add(n);
+    if (seenRef.current.size > 40) {
+      seenRef.current = new Set([...seenRef.current].slice(-20));
     }
-    const lang = detectLanguageFromText(text) || ENGLISH;
-    if (lang.speechCode) listenLangRef.current = lang;
-    setListenLines(prev => [...prev, { id: nextId(), text, lang, time: formatTime() }]);
-    setListenInterim('');
+    return true;
   }, []);
+
+  const translateInterim = useCallback((text, from, to, timerRef, setTrans) => {
+    clearTimeout(timerRef.current);
+    if (!text?.trim() || from === to) { setTrans(''); return; }
+    timerRef.current = setTimeout(async () => {
+      const r = await translate(text, from, to);
+      if (r) setTrans(r);
+    }, 450);
+  }, []);
+
+  /* ── Listen: hear them speak, show original + English translation ── */
+  const handleListenFinal = useCallback(async (text) => {
+    if (!remember(text, listenSeenRef)) return;
+
+    const detected = resolveLang(text, autoDetect ? language : language);
+    if (detected?.speechCode) listenLangRef.current = detected;
+
+    const fromCode = isEnglish(text) ? 'en' : (detected.apiCode || language.apiCode);
+    const translation = fromCode === 'en'
+      ? null
+      : await translate(text, fromCode, 'en');
+
+    setListenLines(prev => [...prev, {
+      id: nextId(),
+      text,
+      lang: detected,
+      translation,
+      time: formatTime(),
+    }]);
+    setListenInterim('');
+    setListenInterimTrans('');
+
+    if (autoDetect && detected?.speechCode && detected.key !== 'en') {
+      listenLangRef.current = detected;
+    } else if (!autoDetect) {
+      listenLangRef.current = language;
+    }
+  }, [autoDetect, language, remember]);
+
+  const handleListenInterim = useCallback((text) => {
+    setListenInterim(text);
+    const detected = resolveLang(text, language);
+    const fromCode = isEnglish(text) ? 'en' : (detected?.apiCode || language.apiCode);
+    if (fromCode === 'en') {
+      setListenInterimTrans('');
+      return;
+    }
+    translateInterim(text, fromCode, 'en', listenTransTimerRef, setListenInterimTrans);
+    if (autoDetect && detected?.speechCode && detected.key !== 'en' && detected.key !== '?') {
+      listenLangRef.current = detected;
+    }
+  }, [autoDetect, language, translateInterim]);
 
   const toggleListen = useCallback(() => {
     if (!speechSupported()) {
@@ -129,71 +211,99 @@ export default function App() {
       setListening(false);
       stopMic();
       setListenInterim('');
+      setListenInterimTrans('');
       return;
     }
     setMicError(null);
     listenActiveRef.current = true;
     setListening(true);
-    listenLoop({
+    listenLangRef.current = autoDetect ? language : language;
+    listenContinuous({
       activeRef: listenActiveRef,
       langRef: listenLangRef,
-      gapMs: 1800,
-      onInterim: (t) => { if (listenActiveRef.current) setListenInterim(t); },
-      onLine: addListenLine,
+      onInterim: handleListenInterim,
+      onFinal: handleListenFinal,
     });
-  }, [listening, addListenLine]);
+  }, [listening, autoDetect, language, handleListenInterim, handleListenFinal]);
 
-  /* ── Translate tab: tap You or Them, one utterance each ── */
-  const runTurn = useCallback(async (who) => {
+  /* ── Conversation: auto-detect speaker, show both languages live ── */
+  const handleConvFinal = useCallback(async (text) => {
+    if (!remember(text, convSeenRef)) return;
+
+    const who = classifySpeaker(text, language);
+    const isYou = who === 'you';
+    convLangRef.current = isYou ? ENGLISH : language;
+
+    if (isYou) {
+      const translated = await translate(text, 'en', language.apiCode);
+      setMessages(prev => [...prev, {
+        id: nextId(), who: 'you',
+        said: text,
+        translation: translated,
+        lang: ENGLISH,
+      }]);
+      if (translated) speak(translated, language.speechCode);
+    } else {
+      const detected = resolveLang(text, language);
+      const fromCode = detected.apiCode || language.apiCode;
+      const translated = await translate(text, fromCode, 'en');
+      setMessages(prev => [...prev, {
+        id: nextId(), who: 'them',
+        said: text,
+        translation: translated,
+        lang: detected,
+      }]);
+      if (translated) speak(translated, ENGLISH.speechCode);
+      if (detected?.speechCode) convLangRef.current = detected;
+    }
+
+    setConvInterim('');
+    setConvInterimTrans('');
+    setConvInterimWho(null);
+  }, [language, remember, speak]);
+
+  const handleConvInterim = useCallback((text) => {
+    const who = classifySpeaker(text, language);
+    setConvInterim(text);
+    setConvInterimWho(who);
+
+    if (who === 'you') {
+      translateInterim(text, 'en', language.apiCode, convTransTimerRef, setConvInterimTrans);
+      convLangRef.current = ENGLISH;
+    } else {
+      const detected = resolveLang(text, language);
+      const fromCode = detected?.apiCode || language.apiCode;
+      translateInterim(text, fromCode, 'en', convTransTimerRef, setConvInterimTrans);
+      if (detected?.speechCode) convLangRef.current = detected;
+      else convLangRef.current = language;
+    }
+  }, [language, translateInterim]);
+
+  const toggleConversation = useCallback(() => {
     if (!speechSupported()) {
       setMicError('Use Chrome or Edge for speech recognition.');
       return;
     }
-    if (busy || Date.now() < lockUntilRef.current) return;
-
-    stopMic();
-    setMicError(null);
-    setBusy(true);
-    setTurn(who);
-    setTurnInterim('');
-
-    const isYou = who === 'you';
-    const recLang = isYou ? ENGLISH.speechCode : language.speechCode;
-
-    const text = await listenOnce({
-      lang: recLang,
-      onInterim: setTurnInterim,
-    });
-
-    setTurn(null);
-    setTurnInterim('');
-
-    if (!text || !remember(text)) {
-      setBusy(false);
+    if (conversing) {
+      convActiveRef.current = false;
+      setConversing(false);
+      stopMic();
+      setConvInterim('');
+      setConvInterimTrans('');
+      setConvInterimWho(null);
       return;
     }
-
-    if (isYou) {
-      const translated = await translate(text, 'en', language.apiCode);
-      if (translated) {
-        setMessages(prev => [...prev, {
-          id: nextId(), who: 'you',
-          said: text, translation: translated,
-        }]);
-        speak(translated, language.speechCode);
-      }
-    } else {
-      const translated = await translate(text, language.apiCode, 'en');
-      if (translated) {
-        setMessages(prev => [...prev, {
-          id: nextId(), who: 'them',
-          said: text, translation: translated,
-        }]);
-        speak(translated, ENGLISH.speechCode);
-      }
-    }
-    setBusy(false);
-  }, [busy, language, remember, speak]);
+    setMicError(null);
+    convActiveRef.current = true;
+    setConversing(true);
+    convLangRef.current = ENGLISH;
+    listenContinuous({
+      activeRef: convActiveRef,
+      langRef: convLangRef,
+      onInterim: handleConvInterim,
+      onFinal: handleConvFinal,
+    });
+  }, [conversing, handleConvInterim, handleConvFinal]);
 
   const filteredLangs = langSearch.trim()
     ? LANGUAGE_LIST.filter(l =>
@@ -203,22 +313,35 @@ export default function App() {
 
   const pinnedLangs = PINNED.map(k => LANGUAGE_LIST.find(l => l.key === k)).filter(Boolean);
 
+  const stopAll = () => {
+    listenActiveRef.current = false;
+    convActiveRef.current = false;
+    setListening(false);
+    setConversing(false);
+    stopMic();
+  };
+
   return (
     <div className="app">
       <main className="main">
         {tab === 'listen' && (
           <div className="panel">
-            <header className="header">
-              <h1 className="header-title">Listen</h1>
-              <p className="header-sub">Overheard speech · auto-labeled</p>
+            <header className="header header-row">
+              <div>
+                <h1 className="header-title">Listen</h1>
+                <p className="header-sub">Hear &amp; translate to English</p>
+                <button type="button" className="lang-chip" onClick={() => setShowLangPicker(true)}>
+                  {autoDetect ? '🌐 Auto-detect' : `${language.flag} ${language.name}`} ▾
+                </button>
+              </div>
             </header>
 
             <div className="scroll">
               {listenLines.length === 0 && !listenInterim && (
                 <div className="empty">
                   <span className="empty-icon">👂</span>
-                  <p>Tap the button below to capture nearby conversation.</p>
-                  <p className="empty-note">You don&apos;t speak — just listen.</p>
+                  <p>Tap the button to hear what someone is saying.</p>
+                  <p className="empty-note">Translation appears as they talk — English on the bottom.</p>
                 </div>
               )}
               {listenLines.map(line => (
@@ -228,11 +351,23 @@ export default function App() {
                     <span className="line-time">{line.time}</span>
                   </div>
                   <p className="line-text">{line.text}</p>
+                  {line.translation && (
+                    <>
+                      <p className="chat-arrow">↓ English</p>
+                      <p className="line-trans">{line.translation}</p>
+                    </>
+                  )}
                 </article>
               ))}
               {listenInterim && (
                 <article className="line-card line-interim">
                   <p className="line-text">{listenInterim}</p>
+                  {listenInterimTrans && (
+                    <>
+                      <p className="chat-arrow">↓ English</p>
+                      <p className="line-trans">{listenInterimTrans}</p>
+                    </>
+                  )}
                 </article>
               )}
               <div ref={listEndRef} />
@@ -260,9 +395,9 @@ export default function App() {
           <div className="panel">
             <header className="header header-row">
               <div>
-                <h1 className="header-title">Translate</h1>
+                <h1 className="header-title">Conversation</h1>
                 <button type="button" className="lang-chip" onClick={() => setShowLangPicker(true)}>
-                  {language.flag} {language.name} ▾
+                  {language.flag} {language.name} ↔ English ▾
                 </button>
               </div>
               <button
@@ -276,71 +411,71 @@ export default function App() {
             </header>
 
             <div className="scroll scroll-chat">
-              {messages.length === 0 && !turnInterim && (
+              {messages.length === 0 && !convInterim && (
                 <div className="empty">
                   <span className="empty-icon">💬</span>
-                  <p>Tap <strong>You</strong> when you speak English.</p>
-                  <p>Tap <strong>Them</strong> when they speak {language.name}.</p>
+                  <p>Tap the button and just talk.</p>
+                  <p className="empty-note">English and {language.name} appear together automatically.</p>
                 </div>
               )}
               {messages.map(msg => (
                 <article key={msg.id} className={`chat ${msg.who === 'you' ? 'chat-you' : 'chat-them'}`}>
-                  <div className="chat-label">{msg.who === 'you' ? 'You said' : `They said · ${language.name}`}</div>
+                  <div className="chat-label">
+                    {msg.who === 'you' ? '🇺🇸 English' : `${msg.lang?.flag || language.flag} ${msg.lang?.name || language.name}`}
+                  </div>
                   <p className="chat-said">{msg.said}</p>
-                  <p className="chat-arrow">↓</p>
-                  <p className="chat-trans">{msg.translation}</p>
+                  {msg.translation && (
+                    <>
+                      <p className="chat-arrow">↓ {msg.who === 'you' ? language.name : 'English'}</p>
+                      <p className="chat-trans">{msg.translation}</p>
+                    </>
+                  )}
                 </article>
               ))}
-              {turnInterim && (
-                <article className="chat chat-interim">
-                  <p className="chat-said">{turnInterim}</p>
+              {convInterim && (
+                <article className={`chat chat-interim ${convInterimWho === 'you' ? 'chat-you' : 'chat-them'}`}>
+                  <div className="chat-label">
+                    {convInterimWho === 'you' ? '🇺🇸 English' : `${language.flag} ${language.name}`}
+                  </div>
+                  <p className="chat-said">{convInterim}</p>
+                  {convInterimTrans && (
+                    <>
+                      <p className="chat-arrow">↓ {convInterimWho === 'you' ? language.name : 'English'}</p>
+                      <p className="chat-trans">{convInterimTrans}</p>
+                    </>
+                  )}
                 </article>
               )}
               <div ref={chatEndRef} />
             </div>
 
-            <div className="turn-bar">
+            <div className="action-bar">
               {messages.length > 0 && (
-                <button type="button" className="text-btn" onClick={() => { setMessages([]); seenRef.current.clear(); }}>
+                <button type="button" className="text-btn" onClick={() => { setMessages([]); convSeenRef.current.clear(); }}>
                   Clear
                 </button>
               )}
-              <div className="turn-btns">
-                <button
-                  type="button"
-                  className={`turn-btn turn-you ${turn === 'you' ? 'turn-active' : ''}`}
-                  disabled={busy && turn !== 'you'}
-                  onClick={() => runTurn('you')}
-                >
-                  <span className="turn-emoji">🇺🇸</span>
-                  <span className="turn-label">You</span>
-                  <span className="turn-hint">English</span>
-                </button>
-                <button
-                  type="button"
-                  className={`turn-btn turn-them ${turn === 'them' ? 'turn-active' : ''}`}
-                  disabled={busy && turn !== 'them'}
-                  onClick={() => runTurn('them')}
-                >
-                  <span className="turn-emoji">{language.flag}</span>
-                  <span className="turn-label">Them</span>
-                  <span className="turn-hint">{language.native}</span>
-                </button>
-              </div>
-              {turn && <p className="turn-status">Speak now…</p>}
+              <button
+                type="button"
+                className={`listen-btn ${conversing ? 'listen-btn-on' : ''}`}
+                onClick={toggleConversation}
+              >
+                <span className="listen-btn-dot" />
+                {conversing ? 'Talking… tap to stop' : 'Start conversation'}
+              </button>
             </div>
           </div>
         )}
       </main>
 
       <nav className="tabbar">
-        <button type="button" className={`tab ${tab === 'listen' ? 'tab-active' : ''}`} onClick={() => { stopMic(); listenActiveRef.current = false; setListening(false); setTab('listen'); }}>
+        <button type="button" className={`tab ${tab === 'listen' ? 'tab-active' : ''}`} onClick={() => { stopAll(); setTab('listen'); }}>
           <span className="tab-icon">👂</span>
           Listen
         </button>
-        <button type="button" className={`tab ${tab === 'translate' ? 'tab-active' : ''}`} onClick={() => { stopMic(); listenActiveRef.current = false; setListening(false); setTab('translate'); }}>
+        <button type="button" className={`tab ${tab === 'translate' ? 'tab-active' : ''}`} onClick={() => { stopAll(); setTab('translate'); }}>
           <span className="tab-icon">💬</span>
-          Translate
+          Talk
         </button>
       </nav>
 
@@ -349,6 +484,17 @@ export default function App() {
           <div className="sheet" onClick={e => e.stopPropagation()}>
             <div className="sheet-grab" />
             <h2 className="sheet-title">Their language</h2>
+            {tab === 'listen' && (
+              <button
+                type="button"
+                className={`lang-row lang-auto ${autoDetect ? 'lang-row-on' : ''}`}
+                onClick={() => { setAutoDetect(true); setShowLangPicker(false); setLangSearch(''); }}
+              >
+                <span>🌐</span>
+                <span>Auto-detect</span>
+                <span className="lang-native">recommended</span>
+              </button>
+            )}
             <input
               className="sheet-search"
               placeholder="Search…"
@@ -362,8 +508,8 @@ export default function App() {
                   <button
                     key={lang.key}
                     type="button"
-                    className={`lang-row ${language.key === lang.key ? 'lang-row-on' : ''}`}
-                    onClick={() => { setLanguage(lang); setShowLangPicker(false); setLangSearch(''); }}
+                    className={`lang-row ${!autoDetect && language.key === lang.key ? 'lang-row-on' : ''}`}
+                    onClick={() => { setLanguage(lang); setAutoDetect(false); setShowLangPicker(false); setLangSearch(''); listenLangRef.current = lang; }}
                   >
                     <span>{lang.flag}</span>
                     <span>{lang.name}</span>
@@ -376,8 +522,8 @@ export default function App() {
                 <button
                   key={lang.key}
                   type="button"
-                  className={`lang-row ${language.key === lang.key ? 'lang-row-on' : ''}`}
-                  onClick={() => { setLanguage(lang); setShowLangPicker(false); setLangSearch(''); }}
+                  className={`lang-row ${!autoDetect && language.key === lang.key ? 'lang-row-on' : ''}`}
+                  onClick={() => { setLanguage(lang); setAutoDetect(false); setShowLangPicker(false); setLangSearch(''); listenLangRef.current = lang; }}
                 >
                   <span>{lang.flag}</span>
                   <span>{lang.name}</span>

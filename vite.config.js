@@ -36,11 +36,11 @@ export default defineConfig({
             },
           },
           {
-            urlPattern: /^https:\/\/lingva\.ml\/.*/i,
+            urlPattern: /^https:\/\/translate\.googleapis\.com\/.*/i,
             handler: 'StaleWhileRevalidate',
             options: {
-              cacheName: 'lingva-cache',
-              expiration: { maxEntries: 300, maxAgeSeconds: 3600 },
+              cacheName: 'google-translate-cache',
+              expiration: { maxEntries: 500, maxAgeSeconds: 3600 },
             },
           },
         ],

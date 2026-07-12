@@ -56,6 +56,69 @@ export function listenOnce({ lang, onInterim }) {
   });
 }
 
+/**
+ * Continuous listen — keeps the mic open, emits interim + final transcripts.
+ * Auto-restarts after pauses/errors while activeRef is true.
+ */
+export function listenContinuous({ activeRef, langRef, onInterim, onFinal }) {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return;
+
+  let rec = null;
+  let lastFinal = '';
+
+  const start = () => {
+    if (!activeRef.current) return;
+
+    try { rec?.abort(); } catch {}
+    rec = new SR();
+    activeRec = rec;
+    busy = true;
+    rec.lang = langRef.current?.speechCode || 'en-US';
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
+
+    rec.onresult = (e) => {
+      if (!activeRef.current) return;
+      let interim = '';
+      let finals = [];
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const r = e.results[i];
+        const text = r[0]?.transcript ?? '';
+        if (!text) continue;
+        if (r.isFinal) finals.push(text.trim());
+        else interim += text;
+      }
+      if (interim.trim()) onInterim?.(interim.trim());
+      for (const text of finals) {
+        if (!text || text === lastFinal) continue;
+        lastFinal = text;
+        onFinal?.(text);
+      }
+    };
+
+    rec.onerror = (e) => {
+      if (!activeRef.current) return;
+      if (e.error === 'aborted') return;
+      setTimeout(start, 400);
+    };
+
+    rec.onend = () => {
+      busy = false;
+      if (activeRec === rec) activeRec = null;
+      if (activeRef.current) setTimeout(start, 200);
+    };
+
+    try { rec.start(); } catch {
+      busy = false;
+      if (activeRef.current) setTimeout(start, 600);
+    }
+  };
+
+  start();
+}
+
 /** Passive listen loop — one phrase at a time, pause between sessions. */
 export async function listenLoop({ activeRef, langRef, gapMs, onInterim, onLine }) {
   while (activeRef.current) {
