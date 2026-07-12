@@ -176,45 +176,63 @@ async function getTranscriber(onModel) {
     onModel?.({ status: 'loading', progress: 0 });
     const { pipeline, env } = await import('@huggingface/transformers');
 
-    // Phone-friendly ONNX settings (multi-thread WASM often fails without COOP/COEP)
-    env.allowLocalModels = false;
+    // Load the quantized model from THIS site (public/models), not Hugging Face.
+    // That avoids mobile download/CORS failures that broke silent mode.
+    const base = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.BASE_URL)
+      ? import.meta.env.BASE_URL
+      : '/';
+    env.localModelPath = `${base}models/`;
+    env.allowLocalModels = true;
+    env.allowRemoteModels = false; // force same-origin model files
     env.useBrowserCache = true;
     env.backends.onnx.wasm.numThreads = 1;
     env.backends.onnx.wasm.proxy = false;
 
-    const models = [
-      // Quantized multilingual — smaller/faster on phones
-      { id: 'onnx-community/whisper-tiny', opts: { dtype: 'q8', device: 'wasm' } },
-      { id: 'Xenova/whisper-tiny', opts: { dtype: 'q8', device: 'wasm' } },
-      { id: 'Xenova/whisper-tiny', opts: { device: 'wasm' } },
-    ];
+    onModel?.({ status: 'loading', progress: 10 });
 
-    let lastErr = null;
-    for (const model of models) {
-      try {
-        const transcriber = await pipeline(
-          'automatic-speech-recognition',
-          model.id,
-          {
-            ...model.opts,
-            progress_callback: (p) => {
-              if (!p) return;
-              onModel?.({
-                status: 'loading',
-                progress: typeof p.progress === 'number' ? p.progress : undefined,
-                file: p.file,
-              });
-            },
+    try {
+      const transcriber = await pipeline(
+        'automatic-speech-recognition',
+        'Xenova/whisper-tiny',
+        {
+          dtype: 'q8',
+          device: 'wasm',
+          local_files_only: true,
+          progress_callback: (p) => {
+            if (!p) return;
+            onModel?.({
+              status: 'loading',
+              progress: typeof p.progress === 'number' ? Math.max(10, p.progress) : undefined,
+              file: p.file,
+            });
           },
-        );
-        onModel?.({ status: 'ready', progress: 100 });
-        return transcriber;
-      } catch (err) {
-        lastErr = err;
-        console.warn('Whisper model failed:', model.id, err);
-      }
+        },
+      );
+      onModel?.({ status: 'ready', progress: 100 });
+      return transcriber;
+    } catch (err) {
+      // Last chance: allow remote HF if local bundle missing (e.g. old deploy)
+      console.warn('Local Whisper failed, trying remote:', err);
+      env.allowRemoteModels = true;
+      const transcriber = await pipeline(
+        'automatic-speech-recognition',
+        'Xenova/whisper-tiny',
+        {
+          dtype: 'q8',
+          device: 'wasm',
+          progress_callback: (p) => {
+            if (!p) return;
+            onModel?.({
+              status: 'loading',
+              progress: typeof p.progress === 'number' ? p.progress : undefined,
+              file: p.file,
+            });
+          },
+        },
+      );
+      onModel?.({ status: 'ready', progress: 100 });
+      return transcriber;
     }
-    throw lastErr || new Error('Unable to load Whisper');
   })().catch((err) => {
     transcriberPromise = null;
     throw err;

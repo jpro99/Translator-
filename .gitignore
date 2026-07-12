@@ -9,3 +9,5 @@ build/
 coverage/
 .DS_Store
 thumbs.db
+# Whisper weights are fetched at build time (too large for git)
+public/models/

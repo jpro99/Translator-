@@ -584,7 +584,7 @@ export default function App() {
                 <div className="empty">
                   <span className="empty-icon">👂</span>
                   <p>Pick their language, then tap Start. No beeps — it listens silently and types as they talk.</p>
-                  <p className="empty-note">First start may download a silent speech model on Wi‑Fi (one time). If that fails, it falls back automatically.</p>
+                  <p className="empty-note">First start prepares a silent speech model from the app (no beeps).</p>
                 </div>
               )}
 

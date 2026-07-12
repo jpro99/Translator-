@@ -33,11 +33,21 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2,webmanifest}'],
+        // Do NOT precache 40MB+ Whisper weights — load on demand from same origin
+        globIgnores: ['**/models/**'],
         cleanupOutdatedCaches: true,
         clientsClaim: true,
         skipWaiting: true,
         navigateFallback: 'index.html',
         runtimeCaching: [
+          {
+            urlPattern: /\/models\/.*/i,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'whisper-local-cache',
+              expiration: { maxEntries: 30, maxAgeSeconds: 60 * 60 * 24 * 365 },
+            },
+          },
           {
             // Whisper model files from Hugging Face (cached after first download)
             urlPattern: /^https:\/\/huggingface\.co\/.*/i,
