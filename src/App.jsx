@@ -2,7 +2,6 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import {
   LANGUAGE_LIST,
   ENGLISH,
-  detectLanguageFromText,
   isEnglish,
   UNIQUE_SCRIPT_KEYS,
 } from './languages';
@@ -17,19 +16,25 @@ import {
 } from './speech';
 
 /* ─── Translation ───────────────────────────────────────────────────── */
+const CACHE_KEY = 'tr_v2';
 const _cacheInit = (() => {
-  try { return JSON.parse(localStorage.getItem('tr_v1') || '[]'); } catch { return []; }
+  try { return JSON.parse(localStorage.getItem(CACHE_KEY) || '[]'); } catch { return []; }
 })();
 const translationCache = new Map(_cacheInit);
+// Drop the old bad cache from earlier Whisper garbage runs
+try { localStorage.removeItem('tr_v1'); } catch {}
 
 function persistCache() {
   try {
-    localStorage.setItem('tr_v1', JSON.stringify([...translationCache.entries()].slice(-900)));
+    localStorage.setItem(CACHE_KEY, JSON.stringify([...translationCache.entries()].slice(-900)));
   } catch {}
 }
 
 function cleanTranslated(text) {
-  return (text || '').replace(/\s+/g, ' ').trim();
+  const t = (text || '').replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  // Sentence-case for English display
+  return t.charAt(0).toUpperCase() + t.slice(1);
 }
 
 async function translateViaGoogle(text, from, to) {
@@ -44,8 +49,9 @@ async function translateViaGoogle(text, from, to) {
 }
 
 async function translateViaMyMemory(text, from, to) {
+  const pairFrom = from === 'auto' ? 'Autodetect' : from;
   const res = await fetch(
-    `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${from}|${to}`,
+    `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${pairFrom}|${to}`,
   );
   const data = await res.json();
   if (data.responseStatus !== 200) throw new Error('mymemory');
@@ -53,20 +59,20 @@ async function translateViaMyMemory(text, from, to) {
 }
 
 async function translateViaLingva(text, from, to) {
-  const res = await fetch(`https://lingva.ml/api/v1/${from}/${to}/${encodeURIComponent(text)}`);
+  const sl = from === 'auto' ? 'auto' : from;
+  const res = await fetch(`https://lingva.ml/api/v1/${sl}/${to}/${encodeURIComponent(text)}`);
   if (!res.ok) throw new Error(`lingva ${res.status}`);
   const data = await res.json();
   return cleanTranslated(data.translation);
 }
 
 /**
- * Translate with retries + auto-detect fallback.
- * Returns the best available translation (may equal source for proper nouns).
+ * Translate with auto-detect first (most reliable), then explicit lang.
  */
 async function translate(text, from, to) {
   const raw = (text || '').trim();
   if (!raw) return null;
-  if (from === to) return raw;
+  if (from !== 'auto' && from === to) return cleanTranslated(raw);
 
   const key = `${raw}|${from}|${to}`;
   if (translationCache.has(key)) return translationCache.get(key);
@@ -78,11 +84,15 @@ async function translate(text, from, to) {
     return r;
   };
 
+  // IMPORTANT: Do NOT treat Latin-script Tagalog/Spanish/etc as English.
+  // isEnglish() only checks alphabet, so "Kumusta ka?" looked English and
+  // translation was skipped — that was the main "doesn't translate" bug.
+
   const attempts = [
-    () => translateViaGoogle(raw, from, to),
     () => translateViaGoogle(raw, 'auto', to),
-    () => translateViaMyMemory(raw, from, to),
-    () => translateViaLingva(raw, from, to),
+    () => translateViaGoogle(raw, from === 'auto' ? 'auto' : from, to),
+    () => translateViaMyMemory(raw, from === 'auto' ? 'Autodetect' : from, to),
+    () => translateViaLingva(raw, from === 'auto' ? 'auto' : from, to),
   ];
 
   let lastSame = null;
@@ -90,7 +100,6 @@ async function translate(text, from, to) {
     try {
       const r = await attempt();
       if (!r) continue;
-      // Prefer a result that actually changed; keep same-text as last resort
       if (r.toLowerCase() !== raw.toLowerCase()) return save(r);
       lastSame = r;
     } catch {}
@@ -234,22 +243,41 @@ export default function App() {
     }]);
     setListenInterim('');
 
-    const toEn = lang.key === 'en'
-      ? cleaned
-      : await translate(cleaned, lang.apiCode, 'en');
-
-    // Don't show English that is also garbage / identical noise
-    const english = toEn && !isGarbageTranscript(toEn) ? toEn : cleaned;
+    let english;
+    if (lang.key === 'en') {
+      english = cleanTranslated(cleaned);
+    } else {
+      // Always translate via auto-detect. Never assume Latin text is English —
+      // Tagalog/Spanish/etc share the Latin alphabet.
+      english = await translate(cleaned, 'auto', 'en');
+      if (!english) english = await translate(cleaned, lang.apiCode, 'en');
+    }
 
     setListenLines((prev) => prev.map((line) => (
       line.id === id
-        ? { ...line, translation: english, translating: false }
+        ? {
+          ...line,
+          translation: english || '(couldn’t translate — try again)',
+          translating: false,
+        }
         : line
     )));
   }, [remember, isRecentDupe]);
 
+  const [typedListen, setTypedListen] = useState('');
+
+  const submitTypedListen = useCallback(async () => {
+    const text = typedListen.trim();
+    if (!text) return;
+    const lang = listenLangRef.current
+      || LANGUAGE_LIST.find((l) => l.key === 'fil')
+      || LANGUAGE_LIST[0];
+    setTypedListen('');
+    await addListenLine(text, lang);
+  }, [typedListen, addListenLine]);
+
   const runListenLoop = useCallback(async (lang) => {
-    setListenStatus('Starting silent mic…');
+    setListenStatus('Starting…');
     listenLangRef.current = lang;
     setListenLang(lang);
 
@@ -262,23 +290,19 @@ export default function App() {
       onModel: (info) => {
         if (!listenActiveRef.current) return;
         if (info.status === 'ready') {
-          setListenStatus(`Listening · ${listenLangRef.current?.name || lang.name} · no beeps`);
-          return;
+          setListenStatus(`Ready · ${listenLangRef.current?.name || lang.name} — speak anytime`);
         }
-        const pct = typeof info.progress === 'number' ? ` ${Math.round(info.progress)}%` : '';
-        setListenStatus(`Loading speech model…${pct}`);
       },
       onEngine: () => {},
       onPhase: (phase) => {
         if (!listenActiveRef.current) return;
         const name = listenLangRef.current?.name || lang.name;
-        if (phase === 'hearing') setListenStatus(`Listening · ${name} · no beeps`);
-        else if (phase === 'transcribing') setListenStatus('Writing sentence…');
+        if (phase === 'hearing') setListenStatus(`Listening · ${name}`);
+        else if (phase === 'transcribing') setListenStatus('Translating…');
         else setListenStatus(`Listening · ${name}`);
       },
       onInterim: (t) => {
         if (!listenActiveRef.current) return;
-        // Show live draft words as they talk (not just a spinner)
         setListenInterim(t || '');
       },
       onFinal: async (text) => {
@@ -287,15 +311,7 @@ export default function App() {
         const cleaned = cleanTranscript(text);
         if (!cleaned || isGarbageTranscript(cleaned)) return;
         const current = listenLangRef.current || lang;
-        const guessed = detectLanguageFromText(cleaned);
-        const useLang = (guessed && guessed.key !== '?' && guessed.key !== 'en' && UNIQUE_SCRIPT_KEYS.has(guessed.key))
-          ? guessed
-          : current;
-        if (useLang.key !== current.key && useLang.speechCode) {
-          listenLangRef.current = useLang;
-          setListenLang(useLang);
-        }
-        void addListenLine(cleaned, useLang.key === 'en' ? ENGLISH : useLang);
+        void addListenLine(cleaned, current);
       },
       onError: (msg) => {
         setMicError(msg);
@@ -394,7 +410,8 @@ export default function App() {
     }]);
     setTurnInterim('');
 
-    const translated = await translate(cleaned, fromCode, toCode);
+    const translated = await translate(cleaned, fromCode === 'en' ? 'en' : 'auto', toCode)
+      || await translate(cleaned, fromCode, toCode);
     const out = translated && !isGarbageTranscript(translated) ? translated : cleaned;
     setMessages((prev) => prev.map((m) => (
       m.id === id
@@ -442,7 +459,7 @@ export default function App() {
   }, [addConverseMessage]);
 
   const runConversationLoop = useCallback(async () => {
-    setConverseStatus('Starting silent mic…');
+    setConverseStatus('Starting…');
 
     await keepListening({
       activeRef: converseActiveRef,
@@ -461,19 +478,16 @@ export default function App() {
         const focus = converseFocusRef.current;
         const label = focus === 'you' ? 'English' : (languageRef.current?.name || '');
         if (info.status === 'ready') {
-          setConverseStatus(`Listening · ${label} · no beeps`);
-          return;
+          setConverseStatus(`Ready · ${label} — speak anytime`);
         }
-        const pct = typeof info.progress === 'number' ? ` ${Math.round(info.progress)}%` : '';
-        setConverseStatus(`Loading speech model…${pct}`);
       },
       onEngine: () => {},
       onPhase: (phase) => {
         if (!converseActiveRef.current) return;
         const focus = converseFocusRef.current;
         const label = focus === 'you' ? 'English' : (languageRef.current?.name || '');
-        if (phase === 'hearing') setConverseStatus(`Listening · ${label} · no beeps`);
-        else if (phase === 'transcribing') setConverseStatus(`Writing · ${label}`);
+        if (phase === 'hearing') setConverseStatus(`Listening · ${label}`);
+        else if (phase === 'transcribing') setConverseStatus(`Translating · ${label}`);
         else setConverseStatus(`On · ${label}`);
       },
       onInterim: (t) => {
@@ -593,8 +607,8 @@ export default function App() {
               {listenLines.length === 0 && !listenInterim && !detecting && (
                 <div className="empty">
                   <span className="empty-icon">👂</span>
-                  <p>Pick their language, then tap Start. Mic stays on silently — no beep loop — and prints sentences as they talk.</p>
-                  <p className="empty-note">First start downloads a speech model on Wi‑Fi (~80MB, once).</p>
+                  <p>Pick their language, then tap Start. It waits silently, then listens only while they talk (no beep loop).</p>
+                  <p className="empty-note">Or type a sentence below to test translation anytime.</p>
                 </div>
               )}
 
@@ -665,6 +679,23 @@ export default function App() {
                 </div>
               )}
               {listenStatus && <p className="turn-status">{listenStatus}</p>}
+              <form
+                className="type-row"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void submitTypedListen();
+                }}
+              >
+                <input
+                  className="type-input"
+                  placeholder="Type what they said to translate…"
+                  value={typedListen}
+                  onChange={(e) => setTypedListen(e.target.value)}
+                />
+                <button type="submit" className="type-go" disabled={!typedListen.trim()}>
+                  Go
+                </button>
+              </form>
               <button
                 type="button"
                 className={`listen-btn ${listening || detecting ? 'listen-btn-on' : ''}`}
@@ -707,7 +738,7 @@ export default function App() {
               {messages.length === 0 && !turnInterim && (
                 <div className="empty">
                   <span className="empty-icon">💬</span>
-                  <p>Tap Start. Silent mic — no beep loop — prints full phrases as each person talks.</p>
+                  <p>Tap Start. Waits silently, then listens only while someone talks — prints full phrases.</p>
                   <p className="empty-note">
                     English ↔ {language.name}. Tap You / Them to switch who the mic is set for.
                   </p>

@@ -222,6 +222,43 @@ body {
   cursor: pointer;
 }
 
+.type-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.type-input {
+  flex: 1;
+  min-width: 0;
+  padding: 12px 14px;
+  border: none;
+  border-radius: 12px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+  font: inherit;
+  font-size: 1rem;
+  color: var(--text);
+  outline: none;
+}
+
+.type-go {
+  flex-shrink: 0;
+  padding: 0 16px;
+  border: none;
+  border-radius: 12px;
+  background: var(--blue);
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.type-go:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .listen-btn {
   display: flex;
   align-items: center;

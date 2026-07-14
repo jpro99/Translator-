@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "vite --host",
     "fetch-whisper": "node scripts/fetch-whisper-model.js",
-    "build": "node scripts/create-icons.js && node scripts/fetch-whisper-model.js && vite build && node scripts/pages-fallback.js",
+    "build": "node scripts/create-icons.js && vite build && node scripts/pages-fallback.js",
     "preview": "vite preview --host"
   },
   "dependencies": {

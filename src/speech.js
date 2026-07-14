@@ -1,34 +1,27 @@
 /**
- * Silent continuous speech capture.
+ * Hybrid speech capture — correct text WITHOUT the Android beep loop.
  *
- * NEVER uses Chrome SpeechRecognition on purpose — on Android every
- * start/stop beeps, and continuous mode still ends → restart beep loop.
+ * Why Whisper alone failed: on-device Whisper-base mishears Tagalog badly
+ * (tested: Tagalog TTS → "Thank you for watching" / garbage).
  *
- * Instead: one getUserMedia session stays open the whole time (no beeps),
- * Web Audio records PCM, and on-device Whisper-base turns it into text.
- * This is what production web apps do when they can't use a cloud STT key.
+ * Why Web Speech alone failed: Android ends the session every few seconds
+ * even during silence, and restarting beeps every time.
+ *
+ * Fix used by practical mobile web apps:
+ *  1) Keep a silent getUserMedia VAD running (no beeps).
+ *  2) Only start Chrome SpeechRecognition when real speech is detected.
+ *  3) When they pause, stop recognition and WAIT — do not restart until
+ *     the next speech burst. One beep per utterance, not beep-beep-beep.
+ *  4) Google’s speech engine gives real Tagalog/Spanish sentences.
  */
 
 let gen = 0;
 let media = null;
-let transcriberPromise = null;
+let activeRec = null;
 let forceEndCapture = false;
-let engineMode = null; // 'whisper' | 'error'
+let engineMode = null;
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-const MODEL_ID = 'Xenova/whisper-base';
-
-const WHISPER_LANG = {
-  en: 'english', ja: 'japanese', ko: 'korean', zh: 'chinese', 'zh-TW': 'chinese',
-  es: 'spanish', fr: 'french', de: 'german', it: 'italian', pt: 'portuguese',
-  ru: 'russian', uk: 'ukrainian', ar: 'arabic', he: 'hebrew', fa: 'persian',
-  hi: 'hindi', th: 'thai', vi: 'vietnamese', id: 'indonesian', ms: 'malay',
-  tl: 'tagalog', fil: 'tagalog', nl: 'dutch', pl: 'polish', tr: 'turkish',
-  sv: 'swedish', no: 'norwegian', da: 'danish', fi: 'finnish', cs: 'czech',
-  ro: 'romanian', hu: 'hungarian', sk: 'slovak', hr: 'croatian', el: 'greek',
-  sw: 'swahili', af: 'afrikaans',
-};
 
 const HALLUCINATION_PHRASES = [
   'thank you for watching',
@@ -41,16 +34,16 @@ const HALLUCINATION_PHRASES = [
   'www.',
   'http://',
   'https://',
-  'mbc 뉴스',
-  '시청해 주셔서',
-  'ご視聴ありがとうございました',
-  'ご視聴',
-  '字幕',
 ];
 
+function getSR() {
+  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
+
 export function speechSupported() {
-  return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia
-    && (window.AudioContext || window.webkitAudioContext));
+  return !!getSR()
+    || !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia
+      && (window.AudioContext || window.webkitAudioContext));
 }
 
 function teardownMedia() {
@@ -65,15 +58,30 @@ function teardownMedia() {
   media = null;
 }
 
+function stopRecognition() {
+  const rec = activeRec;
+  activeRec = null;
+  if (!rec) return;
+  try {
+    rec.onresult = null;
+    rec.onerror = null;
+    rec.onend = null;
+    rec.onstart = null;
+    rec.stop();
+  } catch {
+    try { rec.abort(); } catch {}
+  }
+}
+
 export function restartMic() {
-  // Soft reset of the current utterance only — do NOT tear down the mic
-  // (tearing down/reopening is fine for getUserMedia, but we keep stream up).
   forceEndCapture = true;
+  stopRecognition();
 }
 
 export async function stopMic() {
   gen += 1;
   forceEndCapture = true;
+  stopRecognition();
   teardownMedia();
   await sleep(120);
 }
@@ -88,73 +96,25 @@ function voiceLevel(analyser, buffer) {
   return Math.sqrt(sum / buffer.length);
 }
 
-function concatFloat32(chunks) {
-  let len = 0;
-  for (const c of chunks) len += c.length;
-  const out = new Float32Array(len);
-  let off = 0;
-  for (const c of chunks) {
-    out.set(c, off);
-    off += c.length;
-  }
-  return out;
-}
-
-function downsampleTo16k(input, fromRate) {
-  if (fromRate === 16000) return input;
-  const ratio = fromRate / 16000;
-  const newLen = Math.max(1, Math.floor(input.length / ratio));
-  const out = new Float32Array(newLen);
-  for (let i = 0; i < newLen; i += 1) {
-    out[i] = input[Math.min(input.length - 1, Math.floor(i * ratio))];
-  }
-  return out;
-}
-
-function hasAudibleSpeech(pcm) {
-  if (!pcm?.length) return false;
-  const windowSize = 1024;
-  let activeWindows = 0;
-  let peak = 0;
-  for (let start = 0; start < pcm.length; start += windowSize) {
-    const end = Math.min(start + windowSize, pcm.length);
-    let sum = 0;
-    for (let i = start; i < end; i += 1) {
-      const sample = pcm[i];
-      sum += sample * sample;
-      peak = Math.max(peak, Math.abs(sample));
-    }
-    const rms = Math.sqrt(sum / Math.max(1, end - start));
-    if (rms >= 0.008) activeWindows += 1;
-  }
-  return peak >= 0.022 && activeWindows >= 5;
-}
-
 export function isGarbageTranscript(text) {
   const raw = (text || '').trim();
   if (!raw) return true;
-
   const plain = raw
     .replace(/[\[\](){}「」『』<>]/g, ' ')
     .replace(/[.,!?;:'"…\-_/\\]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
-
   if (!plain || plain.length < 2) return true;
-
   for (const phrase of HALLUCINATION_PHRASES) {
     if (plain.includes(phrase)) return true;
   }
-
   const words = plain.split(/\s+/).filter(Boolean);
   if (!words.length) return true;
-
   if (words.length >= 3) {
     const tiny = words.filter((w) => w.length <= 1).length;
     if (tiny / words.length >= 0.5) return true;
   }
-
   let run = 1;
   for (let i = 1; i < words.length; i += 1) {
     if (words[i] === words[i - 1]) {
@@ -162,36 +122,18 @@ export function isGarbageTranscript(text) {
       if (run >= 3) return true;
     } else run = 1;
   }
-
   if (words.length >= 4) {
     const counts = Object.create(null);
     for (const w of words) counts[w] = (counts[w] || 0) + 1;
-    if (Math.max(...Object.values(counts)) / words.length >= 0.5) return true;
+    if (Math.max(...Object.values(counts)) / words.length >= 0.55) return true;
   }
-
   const compact = plain.replace(/\s+/g, '');
-  if (compact.length >= 10) {
-    if (new Set(compact).size / compact.length < 0.2) return true;
-    for (const n of [1, 2, 3, 4]) {
-      const grams = Object.create(null);
-      for (let i = 0; i <= compact.length - n; i += 1) {
-        const g = compact.slice(i, i + n);
-        grams[g] = (grams[g] || 0) + 1;
-      }
-      const maxG = Math.max(0, ...Object.values(grams));
-      if (maxG >= 5 && (maxG * n) / compact.length >= 0.5) return true;
-    }
-  }
-
-  if (/^\[[^\]]+\]$/.test(raw.trim()) && raw.trim().length < 16) return true;
+  if (compact.length >= 12 && new Set(compact).size / compact.length < 0.18) return true;
   return false;
 }
 
 export function cleanTranscript(text) {
-  return (text || '')
-    .replace(/\s+/g, ' ')
-    .replace(/^\[|\]$/g, '')
-    .trim();
+  return (text || '').replace(/\s+/g, ' ').replace(/^\[|\]$/g, '').trim();
 }
 
 export function isNearDuplicate(a, b) {
@@ -202,26 +144,8 @@ export function isNearDuplicate(a, b) {
   if (x.includes(y) || y.includes(x)) {
     const shorter = Math.min(x.length, y.length);
     const longer = Math.max(x.length, y.length);
-    if (shorter >= 8 && shorter / longer >= 0.72) return true;
+    if (shorter >= 6 && shorter / longer >= 0.75) return true;
   }
-  const ax = new Set(x.split(/\s+/).filter((w) => w.length > 1));
-  const ay = new Set(y.split(/\s+/).filter((w) => w.length > 1));
-  if (!ax.size || !ay.size) return false;
-  let inter = 0;
-  for (const t of ax) if (ay.has(t)) inter += 1;
-  const union = ax.size + ay.size - inter;
-  return union > 0 && inter / union >= 0.78;
-}
-
-/** Real phrases only — not one-word scraps. */
-export function isCommitWorthy(text) {
-  const t = cleanTranscript(text);
-  if (!t || isGarbageTranscript(t)) return false;
-  const words = t.split(/\s+/).filter(Boolean);
-  if (words.length >= 5) return true;
-  if (words.length >= 3 && t.length >= 14) return true;
-  if (words.length >= 2 && t.length >= 22) return true;
-  if (words.length === 1 && t.length >= 16) return true;
   return false;
 }
 
@@ -235,7 +159,7 @@ function resolveLang(getLang) {
   };
 }
 
-async function ensureMedia() {
+async function ensureVadMedia() {
   if (media?.ctx) {
     if (media.ctx.state === 'suspended') {
       try { await media.ctx.resume(); } catch {}
@@ -262,290 +186,110 @@ async function ensureMedia() {
   const source = ctx.createMediaStreamSource(stream);
   const analyser = ctx.createAnalyser();
   analyser.fftSize = 2048;
-  analyser.smoothingTimeConstant = 0.82;
-
-  const processor = ctx.createScriptProcessor(4096, 1, 1);
-  const gain = ctx.createGain();
-  gain.gain.value = 0; // keep graph alive, no speaker feedback
-
-  const capture = { on: false, chunks: [] };
-  processor.onaudioprocess = (event) => {
-    if (!capture.on) return;
-    capture.chunks.push(new Float32Array(event.inputBuffer.getChannelData(0)));
-  };
-
+  analyser.smoothingTimeConstant = 0.85;
+  // Analyser only — no ScriptProcessor speaker path needed for VAD
   source.connect(analyser);
-  source.connect(processor);
-  processor.connect(gain);
-  gain.connect(ctx.destination);
 
-  media = { stream, ctx, source, analyser, processor, gain, capture };
+  media = { stream, ctx, source, analyser };
   return media;
 }
 
-async function getTranscriber(onModel) {
-  if (transcriberPromise) return transcriberPromise;
+/**
+ * Run one Web Speech utterance. Resolves when recognition ends.
+ * Does NOT auto-restart — caller waits for next VAD trigger.
+ */
+function recognizeUtterance({ lang, onInterim, onFinal, myGen }) {
+  const SR = getSR();
+  if (!SR) return Promise.resolve();
 
-  transcriberPromise = (async () => {
-    onModel?.({ status: 'loading', progress: 0 });
-    const { pipeline, env } = await import('@huggingface/transformers');
+  return new Promise((resolve) => {
+    if (myGen !== gen) {
+      resolve();
+      return;
+    }
 
-    const base = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.BASE_URL)
-      ? import.meta.env.BASE_URL
-      : '/';
-    env.localModelPath = `${base}models/`;
-    env.allowLocalModels = true;
-    env.allowRemoteModels = false;
-    env.useBrowserCache = true;
-    env.backends.onnx.wasm.numThreads = 1;
-    env.backends.onnx.wasm.proxy = false;
+    let settled = false;
+    let lastAccepted = '';
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (activeRec === rec) activeRec = null;
+      clearTimeout(maxTimer);
+      resolve();
+    };
 
-    onModel?.({ status: 'loading', progress: 8 });
+    const rec = new SR();
+    activeRec = rec;
+    rec.lang = lang || 'en-US';
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
+
+    // Hard cap so a stuck session can't hold the mic forever
+    const maxTimer = setTimeout(() => {
+      try { rec.stop(); } catch { finish(); }
+    }, 28000);
+
+    rec.onresult = (event) => {
+      if (myGen !== gen) return;
+      let interim = '';
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        const text = cleanTranscript(result[0]?.transcript || '');
+        if (!text) continue;
+        if (result.isFinal) {
+          if (isGarbageTranscript(text)) continue;
+          if (isNearDuplicate(text, lastAccepted)) continue;
+          lastAccepted = text;
+          onInterim?.('');
+          void onFinal?.(text);
+        } else {
+          interim = text;
+        }
+      }
+      if (interim) onInterim?.(interim);
+    };
+
+    rec.onerror = () => {
+      // no-speech / aborted / network → end; caller will wait for next VAD
+    };
+
+    rec.onend = () => finish();
 
     try {
-      const transcriber = await pipeline(
-        'automatic-speech-recognition',
-        MODEL_ID,
-        {
-          dtype: 'q8',
-          device: 'wasm',
-          local_files_only: true,
-          progress_callback: (p) => {
-            if (!p) return;
-            onModel?.({
-              status: 'loading',
-              progress: typeof p.progress === 'number' ? Math.max(8, p.progress) : undefined,
-              file: p.file,
-            });
-          },
-        },
-      );
-      onModel?.({ status: 'ready', progress: 100 });
-      return transcriber;
-    } catch (err) {
-      console.warn('Local Whisper-base failed, trying remote:', err);
-      env.allowRemoteModels = true;
-      const transcriber = await pipeline(
-        'automatic-speech-recognition',
-        MODEL_ID,
-        {
-          dtype: 'q8',
-          device: 'wasm',
-          progress_callback: (p) => {
-            if (!p) return;
-            onModel?.({
-              status: 'loading',
-              progress: typeof p.progress === 'number' ? p.progress : undefined,
-              file: p.file,
-            });
-          },
-        },
-      );
-      onModel?.({ status: 'ready', progress: 100 });
-      return transcriber;
+      rec.start();
+    } catch {
+      finish();
     }
-  })().catch((err) => {
-    transcriberPromise = null;
-    throw err;
   });
-
-  return transcriberPromise;
-}
-
-async function transcribePcm(pcm, sampleRate, apiCode) {
-  const transcriber = await getTranscriber();
-  const audio = downsampleTo16k(pcm, sampleRate);
-  // Need ~1.2s+ for usable phrases with base
-  if (audio.length < 19000) return '';
-
-  const opts = {
-    task: 'transcribe',
-    chunk_length_s: 24,
-    stride_length_s: 3,
-    condition_on_previous_text: false,
-    no_speech_threshold: 0.6,
-    compression_ratio_threshold: 2.4,
-    logprob_threshold: -1.0,
-    temperature: 0,
-  };
-  const lang = WHISPER_LANG[apiCode];
-  if (lang) opts.language = lang;
-
-  const result = await transcriber(audio, opts);
-  return cleanTranscript(typeof result === 'string' ? result : result?.text || '');
 }
 
 /**
- * Mic stays open the whole session (silent).
- * Voice activity → grow a buffer → live draft → commit sentence-sized chunks.
+ * Silent VAD watches for speech. Only then start Google speech once.
+ * After it ends, wait for the next speech — never restart into silence.
  */
-async function keepListeningWhisper({
+async function keepListeningHybrid({
   activeRef, getLang, onInterim, onFinal, onPhase, myGen,
 }) {
-  const { analyser, capture, ctx } = media;
+  const SR = getSR();
+  if (!SR) {
+    onPhase?.('error');
+    return;
+  }
+
+  const { analyser } = media;
   const levelBuf = new Uint8Array(analyser.fftSize);
 
-  // Tuned for conversation-distance phone mics + continuous talk
-  const SPEECH_ON = 0.011;
-  const SPEECH_OFF = 0.0055;
-  const SILENCE_END_MS = 1100;
-  const MIN_UTTER_MS = 1200;
-  const PARTIAL_EVERY_MS = 2400;
-  const AUTO_COMMIT_MS = 7000; // while they keep talking, cut ~7s sentences
-  const OVERLAP_SEC = 0.7;
-  const POLL_MS = 70;
+  const SPEECH_ON = 0.014;
+  const SPEECH_OFF = 0.007;
+  const START_HOLD_MS = 180;   // need sustained voice before starting SR
+  const POLL_MS = 60;
 
-  let speaking = false;
-  let silenceMs = 0;
-  let utterStartedAt = 0;
-  let lastPartialAt = 0;
-  let lastAccepted = '';
-  let lastInterim = '';
-  let transcribing = false;
-  let wantPartial = false;
-  let wantFinal = false;
-  let wantCommit = false;
-  let commitGate = 0;
+  let speechHold = 0;
+  let recognizing = false;
 
-  // Keep capturing for the whole session — never stop the MediaStream mid-listen
-  capture.chunks = [];
-  capture.on = false;
-  onInterim?.('');
   onPhase?.('hearing');
-
-  const snapshotPcm = () => {
-    if (!capture.chunks.length) return null;
-    return concatFloat32(capture.chunks.slice());
-  };
-
-  const keepOverlapOnly = () => {
-    const keepSamples = Math.floor(ctx.sampleRate * OVERLAP_SEC);
-    if (!capture.chunks.length || keepSamples <= 0) {
-      capture.chunks = [];
-      return;
-    }
-    const pcm = concatFloat32(capture.chunks);
-    capture.chunks = pcm.length > keepSamples
-      ? [pcm.slice(pcm.length - keepSamples)]
-      : [pcm];
-  };
-
-  const emitFinal = async (text) => {
-    const t = cleanTranscript(text);
-    if (!t || isGarbageTranscript(t)) return false;
-    const words = t.split(/\s+/).filter(Boolean);
-    if (words.length < 2 && t.length < 14) return false;
-    if (isNearDuplicate(t, lastAccepted)) return false;
-    lastAccepted = t;
-    lastInterim = '';
-    onInterim?.('');
-    await onFinal?.(t);
-    return true;
-  };
-
-  const runTranscribe = async (kind) => {
-    if (!activeRef.current || myGen !== gen) return;
-
-    if (transcribing) {
-      if (kind === 'final') wantFinal = true;
-      else if (kind === 'commit') wantCommit = true;
-      else wantPartial = true;
-      return;
-    }
-
-    const pcm = snapshotPcm();
-    const elapsed = Date.now() - utterStartedAt;
-    if (!pcm || elapsed < MIN_UTTER_MS || !hasAudibleSpeech(pcm)) {
-      if (kind === 'final') {
-        capture.chunks = [];
-        speaking = false;
-        silenceMs = 0;
-        lastInterim = '';
-        onInterim?.('');
-        onPhase?.('hearing');
-      }
-      return;
-    }
-
-    transcribing = true;
-    if (kind === 'final' || kind === 'commit') onPhase?.('transcribing');
-
-    try {
-      const { apiCode } = resolveLang(getLang);
-      const text = await transcribePcm(pcm, ctx.sampleRate, apiCode);
-      if (!activeRef.current || myGen !== gen) return;
-
-      if (!text || isGarbageTranscript(text)) {
-        if (kind === 'final') {
-          if (isCommitWorthy(lastInterim)) await emitFinal(lastInterim);
-          capture.chunks = [];
-          speaking = false;
-          silenceMs = 0;
-          lastInterim = '';
-          onInterim?.('');
-          onPhase?.('hearing');
-        }
-        return;
-      }
-
-      if (kind === 'partial') {
-        lastInterim = text;
-        lastPartialAt = Date.now();
-        onInterim?.(text);
-        onPhase?.('hearing');
-        return;
-      }
-
-      if (kind === 'commit') {
-        if (!isCommitWorthy(text)) {
-          lastInterim = text;
-          onInterim?.(text);
-          onPhase?.('hearing');
-          return;
-        }
-        const ok = await emitFinal(text);
-        keepOverlapOnly();
-        utterStartedAt = Date.now();
-        lastPartialAt = Date.now();
-        silenceMs = 0;
-        commitGate = Date.now();
-        capture.on = true;
-        speaking = true;
-        if (ok) onInterim?.('…');
-        onPhase?.('hearing');
-        return;
-      }
-
-      // final after a real pause — accept solid phrases
-      let ok = await emitFinal(text);
-      if (!ok && isCommitWorthy(lastInterim)) ok = await emitFinal(lastInterim);
-      capture.chunks = [];
-      speaking = false;
-      silenceMs = 0;
-      commitGate = 0;
-      onPhase?.('hearing');
-    } catch (err) {
-      console.error('Whisper transcription failed:', err);
-      if (kind === 'final' || kind === 'commit') onPhase?.('hearing');
-    } finally {
-      transcribing = false;
-      if (!activeRef.current || myGen !== gen) return;
-
-      if (wantFinal) {
-        wantFinal = false;
-        wantPartial = false;
-        wantCommit = false;
-        await runTranscribe('final');
-      } else if (wantCommit && speaking) {
-        wantCommit = false;
-        wantPartial = false;
-        await runTranscribe('commit');
-      } else if (wantPartial && speaking) {
-        wantPartial = false;
-        await runTranscribe('partial');
-      }
-    }
-  };
+  onInterim?.('');
 
   while (activeRef.current && myGen === gen) {
     if (media?.ctx?.state === 'suspended') {
@@ -554,88 +298,63 @@ async function keepListeningWhisper({
 
     if (forceEndCapture) {
       forceEndCapture = false;
-      if (speaking) {
-        // Language switch: finish current phrase, keep mic stream alive
-        void runTranscribe('final');
-        while (transcribing && activeRef.current && myGen === gen) {
-          await sleep(80);
-        }
-        speaking = false;
-        capture.on = false;
-        capture.chunks = [];
-        lastInterim = '';
-        onInterim?.('');
-        onPhase?.('hearing');
-      }
+      stopRecognition();
+      recognizing = false;
+      onInterim?.('');
+      onPhase?.('hearing');
+      await sleep(POLL_MS);
+      continue;
+    }
+
+    if (recognizing) {
       await sleep(POLL_MS);
       continue;
     }
 
     const level = voiceLevel(analyser, levelBuf);
-    const now = Date.now();
+    if (level >= SPEECH_ON) {
+      speechHold += POLL_MS;
+    } else if (level < SPEECH_OFF) {
+      speechHold = 0;
+    }
 
-    if (!speaking) {
-      if (level >= SPEECH_ON) {
-        speaking = true;
-        silenceMs = 0;
-        utterStartedAt = now;
-        lastPartialAt = now;
-        commitGate = now;
-        lastInterim = '';
-        capture.chunks = [];
-        capture.on = true;
-        onInterim?.('…');
-        onPhase?.('hearing');
-      }
+    if (speechHold >= START_HOLD_MS) {
+      speechHold = 0;
+      recognizing = true;
+      onPhase?.('hearing');
+      const { speechCode } = resolveLang(getLang);
+
+      // One beep here when recognition starts — then it runs until they pause.
+      await recognizeUtterance({
+        lang: speechCode,
+        onInterim: (t) => {
+          if (activeRef.current && myGen === gen) onInterim?.(t);
+        },
+        onFinal: async (text) => {
+          if (!activeRef.current || myGen !== gen) return;
+          onPhase?.('transcribing');
+          await onFinal?.(text);
+          if (activeRef.current && myGen === gen) onPhase?.('hearing');
+        },
+        myGen,
+      });
+
+      recognizing = false;
+      onInterim?.('');
+      // Cool-down so we don't immediately re-trigger on trailing noise
+      await sleep(450);
+      if (activeRef.current && myGen === gen) onPhase?.('hearing');
     } else {
-      if (level >= SPEECH_OFF) silenceMs = 0;
-      else silenceMs += POLL_MS;
-
-      const elapsed = now - utterStartedAt;
-
-      // Live draft (UI only) — never auto-print one-word scraps
-      if (
-        capture.on
-        && elapsed >= MIN_UTTER_MS
-        && now - lastPartialAt >= PARTIAL_EVERY_MS
-        && !transcribing
-      ) {
-        lastPartialAt = now;
-        void runTranscribe('partial');
-      }
-
-      // Continuous talker: every ~7s run a fresh full-buffer commit
-      if (
-        elapsed >= AUTO_COMMIT_MS
-        && now - commitGate >= AUTO_COMMIT_MS
-        && !transcribing
-      ) {
-        commitGate = now;
-        void runTranscribe('commit');
-      } else if (silenceMs >= SILENCE_END_MS) {
-        capture.on = false;
-        void runTranscribe('final');
-        while (transcribing && activeRef.current && myGen === gen) {
-          await sleep(80);
-        }
-      }
-    }
-
-    await sleep(POLL_MS);
-  }
-
-  capture.on = false;
-  if (speaking && capture.chunks.length && activeRef.current && myGen === gen) {
-    void runTranscribe('final');
-    while (transcribing && activeRef.current && myGen === gen) {
-      await sleep(80);
+      await sleep(POLL_MS);
     }
   }
+
+  stopRecognition();
+  onInterim?.('');
 }
 
 /**
- * Always-on silent listen until Stop.
- * One mic session, Whisper-base sentences, zero SpeechRecognition beeps.
+ * Always-on listen until Stop.
  */
 export async function keepListening({
   activeRef,
@@ -648,7 +367,7 @@ export async function keepListening({
   onEngine,
 }) {
   if (!speechSupported()) {
-    onError?.('This browser can’t access the microphone.');
+    onError?.('This browser can’t access the microphone. Use Chrome.');
     return;
   }
 
@@ -656,28 +375,24 @@ export async function keepListening({
   forceEndCapture = false;
   engineMode = null;
 
+  if (!getSR()) {
+    onError?.('Speech recognition needs Chrome or Edge.');
+    activeRef.current = false;
+    return;
+  }
+
   try {
-    await ensureMedia();
+    await ensureVadMedia();
   } catch {
     onError?.('Microphone access denied — allow it in browser settings.');
     activeRef.current = false;
     return;
   }
 
-  try {
-    await getTranscriber(onModel);
-    engineMode = 'whisper';
-    onEngine?.('whisper');
-  } catch (err) {
-    console.error('Whisper-base failed:', err);
-    engineMode = 'error';
-    onEngine?.('error');
-    onModel?.({ status: 'error' });
-    onError?.('Speech model couldn’t load. Reload on Wi‑Fi and try again.');
-    activeRef.current = false;
-    teardownMedia();
-    return;
-  }
+  // Ready immediately — no huge model download
+  engineMode = 'hybrid';
+  onEngine?.('hybrid');
+  onModel?.({ status: 'ready', progress: 100 });
 
   if (!activeRef.current || myGen !== gen) {
     teardownMedia();
@@ -685,11 +400,14 @@ export async function keepListening({
   }
 
   try {
-    await keepListeningWhisper({
+    await keepListeningHybrid({
       activeRef, getLang, onInterim, onFinal, onPhase, myGen,
     });
   } finally {
-    if (myGen === gen) teardownMedia();
+    if (myGen === gen) {
+      stopRecognition();
+      teardownMedia();
+    }
   }
 }
 
