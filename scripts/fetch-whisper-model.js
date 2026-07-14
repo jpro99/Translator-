@@ -1,6 +1,9 @@
 /**
- * Download quantized Whisper-tiny into public/models so the phone loads it
+ * Download quantized Whisper-base into public/models so the phone loads it
  * from the same origin (no Hugging Face download at runtime).
+ *
+ * whisper-base >> whisper-tiny for real sentences / Tagalog quality.
+ * Still small enough for GitHub Pages (~77MB ONNX).
  */
 const fs = require('fs');
 const path = require('path');
@@ -8,8 +11,9 @@ const https = require('https');
 const http = require('http');
 const { URL } = require('url');
 
-const ROOT = path.join(__dirname, '..', 'public', 'models', 'Xenova', 'whisper-tiny');
-const BASE = 'https://huggingface.co/Xenova/whisper-tiny/resolve/main';
+const MODEL = 'whisper-base';
+const ROOT = path.join(__dirname, '..', 'public', 'models', 'Xenova', MODEL);
+const BASE = `https://huggingface.co/Xenova/${MODEL}/resolve/main`;
 
 const FILES = [
   'config.json',
@@ -69,8 +73,8 @@ async function main() {
     await fetchToFile(`${BASE}/${file}`, dest);
     console.log(fs.statSync(dest).size);
   }
-  if (missing === 0) console.log('Whisper model already present');
-  else console.log(`Fetched ${missing} Whisper model file(s) → public/models/Xenova/whisper-tiny`);
+  if (missing === 0) console.log(`${MODEL} already present`);
+  else console.log(`Fetched ${missing} file(s) → public/models/Xenova/${MODEL}`);
 }
 
 main().catch((err) => {

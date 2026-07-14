@@ -249,7 +249,7 @@ export default function App() {
   }, [remember, isRecentDupe]);
 
   const runListenLoop = useCallback(async (lang) => {
-    setListenStatus('Starting mic…');
+    setListenStatus('Starting silent mic…');
     listenLangRef.current = lang;
     setListenLang(lang);
 
@@ -262,27 +262,18 @@ export default function App() {
       onModel: (info) => {
         if (!listenActiveRef.current) return;
         if (info.status === 'ready') {
-          setListenStatus(`Listening live · ${listenLangRef.current?.name || lang.name}`);
-          return;
-        }
-        if (info.status === 'fallback') {
-          setListenStatus(`Listening · ${listenLangRef.current?.name || lang.name}`);
+          setListenStatus(`Listening · ${listenLangRef.current?.name || lang.name} · no beeps`);
           return;
         }
         const pct = typeof info.progress === 'number' ? ` ${Math.round(info.progress)}%` : '';
-        setListenStatus(`Loading speech engine…${pct}`);
+        setListenStatus(`Loading speech model…${pct}`);
       },
-      onEngine: (mode) => {
-        if (!listenActiveRef.current) return;
-        if (mode === 'webspeech') {
-          setListenStatus(`Listening live · ${listenLangRef.current?.name || lang.name}`);
-        }
-      },
+      onEngine: () => {},
       onPhase: (phase) => {
         if (!listenActiveRef.current) return;
         const name = listenLangRef.current?.name || lang.name;
-        if (phase === 'hearing') setListenStatus(`Listening live · ${name}`);
-        else if (phase === 'transcribing') setListenStatus('Capturing sentence…');
+        if (phase === 'hearing') setListenStatus(`Listening · ${name} · no beeps`);
+        else if (phase === 'transcribing') setListenStatus('Writing sentence…');
         else setListenStatus(`Listening · ${name}`);
       },
       onInterim: (t) => {
@@ -451,7 +442,7 @@ export default function App() {
   }, [addConverseMessage]);
 
   const runConversationLoop = useCallback(async () => {
-    setConverseStatus('Starting mic…');
+    setConverseStatus('Starting silent mic…');
 
     await keepListening({
       activeRef: converseActiveRef,
@@ -470,29 +461,20 @@ export default function App() {
         const focus = converseFocusRef.current;
         const label = focus === 'you' ? 'English' : (languageRef.current?.name || '');
         if (info.status === 'ready') {
-          setConverseStatus(`Live · ${label}`);
-          return;
-        }
-        if (info.status === 'fallback') {
-          setConverseStatus(`On · ${label} — speak anytime`);
+          setConverseStatus(`Listening · ${label} · no beeps`);
           return;
         }
         const pct = typeof info.progress === 'number' ? ` ${Math.round(info.progress)}%` : '';
-        setConverseStatus(`Loading speech engine…${pct}`);
+        setConverseStatus(`Loading speech model…${pct}`);
       },
-      onEngine: (mode) => {
-        if (!converseActiveRef.current) return;
-        const focus = converseFocusRef.current;
-        const label = focus === 'you' ? 'English' : (languageRef.current?.name || '');
-        if (mode === 'webspeech') setConverseStatus(`Live · ${label}`);
-      },
+      onEngine: () => {},
       onPhase: (phase) => {
         if (!converseActiveRef.current) return;
         const focus = converseFocusRef.current;
         const label = focus === 'you' ? 'English' : (languageRef.current?.name || '');
-        if (phase === 'hearing') setConverseStatus(`Live · ${label}`);
-        else if (phase === 'transcribing') setConverseStatus(`Capturing · ${label}`);
-        else setConverseStatus(`On · ${label} — speak anytime`);
+        if (phase === 'hearing') setConverseStatus(`Listening · ${label} · no beeps`);
+        else if (phase === 'transcribing') setConverseStatus(`Writing · ${label}`);
+        else setConverseStatus(`On · ${label}`);
       },
       onInterim: (t) => {
         if (converseActiveRef.current) setTurnInterim(t || '');
@@ -611,8 +593,8 @@ export default function App() {
               {listenLines.length === 0 && !listenInterim && !detecting && (
                 <div className="empty">
                   <span className="empty-icon">👂</span>
-                  <p>Pick their language, then tap Start. Text appears live in sentences while they talk.</p>
-                  <p className="empty-note">Works best in Chrome. Hold the phone near them.</p>
+                  <p>Pick their language, then tap Start. Mic stays on silently — no beep loop — and prints sentences as they talk.</p>
+                  <p className="empty-note">First start downloads a speech model on Wi‑Fi (~80MB, once).</p>
                 </div>
               )}
 
@@ -725,7 +707,7 @@ export default function App() {
               {messages.length === 0 && !turnInterim && (
                 <div className="empty">
                   <span className="empty-icon">💬</span>
-                  <p>Tap Start. Live listening prints full phrases as each person talks.</p>
+                  <p>Tap Start. Silent mic — no beep loop — prints full phrases as each person talks.</p>
                   <p className="empty-note">
                     English ↔ {language.name}. Tap You / Them to switch who the mic is set for.
                   </p>
