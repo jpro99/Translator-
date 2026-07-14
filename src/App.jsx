@@ -249,7 +249,7 @@ export default function App() {
   }, [remember, isRecentDupe]);
 
   const runListenLoop = useCallback(async (lang) => {
-    setListenStatus('Starting silent engine…');
+    setListenStatus('Starting mic…');
     listenLangRef.current = lang;
     setListenLang(lang);
 
@@ -262,23 +262,27 @@ export default function App() {
       onModel: (info) => {
         if (!listenActiveRef.current) return;
         if (info.status === 'ready') {
-          setListenStatus(`Listening · ${listenLangRef.current?.name || lang.name}`);
+          setListenStatus(`Listening live · ${listenLangRef.current?.name || lang.name}`);
           return;
         }
         if (info.status === 'fallback') {
-          setMicError('Silent mode couldn’t load. Using phone speech (may beep once when they talk).');
           setListenStatus(`Listening · ${listenLangRef.current?.name || lang.name}`);
           return;
         }
         const pct = typeof info.progress === 'number' ? ` ${Math.round(info.progress)}%` : '';
-        setListenStatus(`Loading silent speech engine…${pct}`);
+        setListenStatus(`Loading speech engine…${pct}`);
       },
-      onEngine: () => {},
+      onEngine: (mode) => {
+        if (!listenActiveRef.current) return;
+        if (mode === 'webspeech') {
+          setListenStatus(`Listening live · ${listenLangRef.current?.name || lang.name}`);
+        }
+      },
       onPhase: (phase) => {
         if (!listenActiveRef.current) return;
         const name = listenLangRef.current?.name || lang.name;
         if (phase === 'hearing') setListenStatus(`Listening live · ${name}`);
-        else if (phase === 'transcribing') setListenStatus('Updating translation…');
+        else if (phase === 'transcribing') setListenStatus('Capturing sentence…');
         else setListenStatus(`Listening · ${name}`);
       },
       onInterim: (t) => {
@@ -447,7 +451,7 @@ export default function App() {
   }, [addConverseMessage]);
 
   const runConversationLoop = useCallback(async () => {
-    setConverseStatus('Starting silent engine…');
+    setConverseStatus('Starting mic…');
 
     await keepListening({
       activeRef: converseActiveRef,
@@ -466,23 +470,28 @@ export default function App() {
         const focus = converseFocusRef.current;
         const label = focus === 'you' ? 'English' : (languageRef.current?.name || '');
         if (info.status === 'ready') {
-          setConverseStatus(`On · ${label} — speak anytime`);
+          setConverseStatus(`Live · ${label}`);
           return;
         }
         if (info.status === 'fallback') {
-          setMicError('Silent mode couldn’t load. Using phone speech (may beep once when someone talks).');
           setConverseStatus(`On · ${label} — speak anytime`);
           return;
         }
         const pct = typeof info.progress === 'number' ? ` ${Math.round(info.progress)}%` : '';
-        setConverseStatus(`Loading silent speech engine…${pct}`);
+        setConverseStatus(`Loading speech engine…${pct}`);
+      },
+      onEngine: (mode) => {
+        if (!converseActiveRef.current) return;
+        const focus = converseFocusRef.current;
+        const label = focus === 'you' ? 'English' : (languageRef.current?.name || '');
+        if (mode === 'webspeech') setConverseStatus(`Live · ${label}`);
       },
       onPhase: (phase) => {
         if (!converseActiveRef.current) return;
         const focus = converseFocusRef.current;
         const label = focus === 'you' ? 'English' : (languageRef.current?.name || '');
         if (phase === 'hearing') setConverseStatus(`Live · ${label}`);
-        else if (phase === 'transcribing') setConverseStatus(`Updating · ${label}`);
+        else if (phase === 'transcribing') setConverseStatus(`Capturing · ${label}`);
         else setConverseStatus(`On · ${label} — speak anytime`);
       },
       onInterim: (t) => {
@@ -602,8 +611,8 @@ export default function App() {
               {listenLines.length === 0 && !listenInterim && !detecting && (
                 <div className="empty">
                   <span className="empty-icon">👂</span>
-                  <p>Pick their language, then tap Start. Text appears live while they talk — no need to pause between every word.</p>
-                  <p className="empty-note">First start loads a silent speech model (no beeps).</p>
+                  <p>Pick their language, then tap Start. Text appears live in sentences while they talk.</p>
+                  <p className="empty-note">Works best in Chrome. Hold the phone near them.</p>
                 </div>
               )}
 
