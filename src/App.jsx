@@ -725,7 +725,7 @@ export default function App() {
               {messages.length === 0 && !turnInterim && (
                 <div className="empty">
                   <span className="empty-icon">💬</span>
-                  <p>Tap Start. Silent listening — no beeps — prints both languages as each person talks.</p>
+                  <p>Tap Start. Live listening prints full phrases as each person talks.</p>
                   <p className="empty-note">
                     English ↔ {language.name}. Tap You / Them to switch who the mic is set for.
                   </p>
