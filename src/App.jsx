@@ -277,13 +277,14 @@ export default function App() {
       onPhase: (phase) => {
         if (!listenActiveRef.current) return;
         const name = listenLangRef.current?.name || lang.name;
-        if (phase === 'hearing') setListenStatus(`Listening for speech · ${name}`);
-        else if (phase === 'transcribing') setListenStatus(`Got it — translating…`);
+        if (phase === 'hearing') setListenStatus(`Listening live · ${name}`);
+        else if (phase === 'transcribing') setListenStatus('Updating translation…');
         else setListenStatus(`Listening · ${name}`);
       },
       onInterim: (t) => {
         if (!listenActiveRef.current) return;
-        setListenInterim(t === '…' ? 'Hearing…' : (t || ''));
+        // Show live draft words as they talk (not just a spinner)
+        setListenInterim(t || '');
       },
       onFinal: async (text) => {
         if (!listenActiveRef.current) return;
@@ -480,8 +481,8 @@ export default function App() {
         if (!converseActiveRef.current) return;
         const focus = converseFocusRef.current;
         const label = focus === 'you' ? 'English' : (languageRef.current?.name || '');
-        if (phase === 'hearing') setConverseStatus(`Hearing · ${label}`);
-        else if (phase === 'transcribing') setConverseStatus(`Transcribing · ${label}`);
+        if (phase === 'hearing') setConverseStatus(`Live · ${label}`);
+        else if (phase === 'transcribing') setConverseStatus(`Updating · ${label}`);
         else setConverseStatus(`On · ${label} — speak anytime`);
       },
       onInterim: (t) => {
@@ -601,8 +602,8 @@ export default function App() {
               {listenLines.length === 0 && !listenInterim && !detecting && (
                 <div className="empty">
                   <span className="empty-icon">👂</span>
-                  <p>Pick their language, then tap Start. No beeps — it listens silently and types as they talk.</p>
-                  <p className="empty-note">First start prepares a silent speech model from the app (no beeps).</p>
+                  <p>Pick their language, then tap Start. Text appears live while they talk — no need to pause between every word.</p>
+                  <p className="empty-note">First start loads a silent speech model (no beeps).</p>
                 </div>
               )}
 
@@ -633,7 +634,11 @@ export default function App() {
 
               {listenInterim && (
                 <article className="line-card line-interim">
-                  <p className="line-text">{listenInterim}</p>
+                  <div className="line-meta">
+                    <span>Live</span>
+                    <span className="line-time">updating…</span>
+                  </div>
+                  <p className="line-text">{listenInterim === '…' ? 'Listening…' : listenInterim}</p>
                 </article>
               )}
               <div ref={listEndRef} />
@@ -734,9 +739,9 @@ export default function App() {
               {turnInterim && (
                 <article className="chat chat-interim">
                   <div className="chat-label">
-                    {converseFocus === 'you' ? 'You · English' : `Them · ${language.name}`}
+                    Live · {converseFocus === 'you' ? 'English' : language.name}
                   </div>
-                  <p className="chat-said">{turnInterim}</p>
+                  <p className="chat-said">{turnInterim === '…' ? 'Listening…' : turnInterim}</p>
                 </article>
               )}
               <div ref={chatEndRef} />

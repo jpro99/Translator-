@@ -390,75 +390,177 @@ async function transcribePcm(pcm, sampleRate, apiCode) {
 }
 
 /**
- * Voice-activated listen: record only while someone is talking,
- * then transcribe that utterance. Never feed silence to Whisper.
+ * Voice-activated listen with live streaming text (Google Translate style).
+ *
+ * - While they talk: periodically transcribe the growing utterance → onInterim
+ * - If they keep talking with no pause: auto-commit a finished phrase and continue
+ * - On a short pause: finalize the current utterance → onFinal
+ * Silence/noise is never sent to Whisper.
  */
 async function keepListeningWhisper({
   activeRef, getLang, onInterim, onFinal, onPhase, myGen,
 }) {
-  const { analyser, capture } = media;
+  const { analyser, capture, ctx } = media;
   const levelBuf = new Uint8Array(analyser.fftSize);
 
   // Hysteresis thresholds (RMS) — phone mics at conversation distance
   const SPEECH_ON = 0.015;
   const SPEECH_OFF = 0.008;
-  const SILENCE_END_MS = 900;
-  const MAX_UTTER_MS = 9000;
-  const MIN_UTTER_MS = 450;
-  const POLL_MS = 70;
+  const SILENCE_END_MS = 700;
+  const MIN_UTTER_MS = 400;
+  const PARTIAL_EVERY_MS = 1400;   // live text updates while talking
+  const AUTO_COMMIT_MS = 4500;    // don't wait forever for a pause
+  const OVERLAP_SEC = 0.45;       // keep a little audio across mid-speech commits
+  const POLL_MS = 60;
 
   let speaking = false;
   let silenceMs = 0;
   let utterStartedAt = 0;
+  let lastPartialAt = 0;
   let lastAccepted = '';
+  let lastInterim = '';
+  let transcribing = false;
+  let wantPartial = false;
+  let wantFinal = false;
 
   capture.chunks = [];
   capture.on = false;
   onInterim?.('');
   onPhase?.('hearing');
 
-  const finishUtterance = async () => {
-    capture.on = false;
-    const chunks = capture.chunks;
-    capture.chunks = [];
-    speaking = false;
-    silenceMs = 0;
+  const snapshotPcm = () => {
+    if (!capture.chunks.length) return null;
+    return concatFloat32(capture.chunks.slice());
+  };
 
-    const elapsed = Date.now() - utterStartedAt;
+  const keepOverlapOnly = () => {
+    const keepSamples = Math.floor(ctx.sampleRate * OVERLAP_SEC);
+    if (!capture.chunks.length || keepSamples <= 0) {
+      capture.chunks = [];
+      return;
+    }
+    const pcm = concatFloat32(capture.chunks);
+    capture.chunks = pcm.length > keepSamples
+      ? [pcm.slice(pcm.length - keepSamples)]
+      : [pcm];
+  };
+
+  const emitFinal = async (text) => {
+    if (!text || isGarbageTranscript(text)) return false;
+    if (isNearDuplicate(text, lastAccepted)) return false;
+    lastAccepted = text;
+    lastInterim = '';
     onInterim?.('');
+    await onFinal?.(text);
+    return true;
+  };
 
-    if (elapsed < MIN_UTTER_MS || !chunks.length) {
-      onPhase?.('hearing');
+  const runTranscribe = async (kind) => {
+    if (!activeRef.current || myGen !== gen) return;
+
+    if (transcribing) {
+      if (kind === 'final') wantFinal = true;
+      else wantPartial = true;
       return;
     }
 
-    const pcm = concatFloat32(chunks);
-    if (!hasAudibleSpeech(pcm)) {
-      onPhase?.('hearing');
+    const pcm = snapshotPcm();
+    const elapsed = Date.now() - utterStartedAt;
+    if (!pcm || elapsed < MIN_UTTER_MS || !hasAudibleSpeech(pcm)) {
+      if (kind === 'final') {
+        capture.chunks = [];
+        speaking = false;
+        silenceMs = 0;
+        lastInterim = '';
+        onInterim?.('');
+        onPhase?.('hearing');
+      }
       return;
     }
 
-    onPhase?.('transcribing');
+    transcribing = true;
+    if (kind === 'final') onPhase?.('transcribing');
+
     try {
       const { apiCode } = resolveLang(getLang);
-      const text = await transcribePcm(pcm, media.ctx.sampleRate, apiCode);
+      const text = await transcribePcm(pcm, ctx.sampleRate, apiCode);
       if (!activeRef.current || myGen !== gen) return;
 
       if (!text || isGarbageTranscript(text)) {
-        onPhase?.('hearing');
+        if (kind === 'final') {
+          // Fall back to last live interim if Whisper choked on the tail silence
+          if (lastInterim && !isGarbageTranscript(lastInterim)) {
+            await emitFinal(lastInterim);
+          }
+          capture.chunks = [];
+          speaking = false;
+          silenceMs = 0;
+          lastInterim = '';
+          onInterim?.('');
+          onPhase?.('hearing');
+        }
         return;
       }
-      if (isNearDuplicate(text, lastAccepted)) {
+
+      if (kind === 'final') {
+        await emitFinal(text);
+        capture.chunks = [];
+        speaking = false;
+        silenceMs = 0;
         onPhase?.('hearing');
         return;
       }
 
-      lastAccepted = text;
-      await onFinal?.(text);
+      // Live partial — update the on-screen draft while they keep talking
+      lastInterim = text;
+      lastPartialAt = Date.now();
+      onInterim?.(text);
+      onPhase?.('hearing');
     } catch (err) {
       console.error('Whisper transcription failed:', err);
+      if (kind === 'final') onPhase?.('hearing');
+    } finally {
+      transcribing = false;
+      if (!activeRef.current || myGen !== gen) return;
+
+      if (wantFinal) {
+        wantFinal = false;
+        wantPartial = false;
+        await runTranscribe('final');
+      } else if (wantPartial && speaking) {
+        wantPartial = false;
+        await runTranscribe('partial');
+      }
     }
-    if (activeRef.current && myGen === gen) onPhase?.('hearing');
+  };
+
+  const finishUtterance = () => {
+    capture.on = false;
+    void runTranscribe('final');
+  };
+
+  /** Mid-speech commit so long monologues still produce lines (Google-style). */
+  const autoCommitWhileTalking = async () => {
+    if (!speaking || !lastInterim || isGarbageTranscript(lastInterim)) return;
+    if (isNearDuplicate(lastInterim, lastAccepted)) return;
+
+    // Don't let a stale partial overwrite this commit
+    wantPartial = false;
+
+    // Commit what we have so far, keep a short overlap, keep recording
+    const committed = lastInterim;
+    lastInterim = '';
+    onInterim?.('');
+    onPhase?.('transcribing');
+    const ok = await emitFinal(committed);
+    keepOverlapOnly();
+    utterStartedAt = Date.now();
+    lastPartialAt = Date.now();
+    silenceMs = 0;
+    capture.on = true;
+    speaking = true;
+    if (ok) onInterim?.('…');
+    onPhase?.('hearing');
   };
 
   while (activeRef.current && myGen === gen) {
@@ -466,37 +568,57 @@ async function keepListeningWhisper({
       try { await media.ctx.resume(); } catch {}
     }
 
-    // Language switch / hard restart from UI
     if (forceEndCapture) {
       forceEndCapture = false;
-      if (speaking) {
-        await finishUtterance();
-      }
+      if (speaking) finishUtterance();
+      await sleep(POLL_MS);
       continue;
     }
 
     const level = voiceLevel(analyser, levelBuf);
+    const now = Date.now();
 
     if (!speaking) {
       if (level >= SPEECH_ON) {
         speaking = true;
         silenceMs = 0;
-        utterStartedAt = Date.now();
+        utterStartedAt = now;
+        lastPartialAt = now;
+        lastInterim = '';
         capture.chunks = [];
         capture.on = true;
         onInterim?.('…');
         onPhase?.('hearing');
       }
-    } else if (level >= SPEECH_OFF) {
-      silenceMs = 0;
-      const elapsed = Date.now() - utterStartedAt;
-      if (elapsed >= MAX_UTTER_MS) {
-        await finishUtterance();
-      }
     } else {
-      silenceMs += POLL_MS;
-      if (silenceMs >= SILENCE_END_MS) {
-        await finishUtterance();
+      if (level >= SPEECH_OFF) {
+        silenceMs = 0;
+      } else {
+        silenceMs += POLL_MS;
+      }
+
+      const elapsed = now - utterStartedAt;
+
+      // Live draft text while they talk
+      if (
+        capture.on
+        && elapsed >= MIN_UTTER_MS
+        && now - lastPartialAt >= PARTIAL_EVERY_MS
+        && !transcribing
+      ) {
+        lastPartialAt = now;
+        void runTranscribe('partial');
+      }
+
+      // They never paused — commit a phrase and keep listening
+      if (elapsed >= AUTO_COMMIT_MS && lastInterim && !transcribing) {
+        await autoCommitWhileTalking();
+      } else if (silenceMs >= SILENCE_END_MS) {
+        finishUtterance();
+        // Wait for final to settle before looking for next speech
+        while (transcribing && activeRef.current && myGen === gen) {
+          await sleep(80);
+        }
       }
     }
 
@@ -505,7 +627,10 @@ async function keepListeningWhisper({
 
   capture.on = false;
   if (speaking && capture.chunks.length && activeRef.current && myGen === gen) {
-    await finishUtterance();
+    finishUtterance();
+    while (transcribing && activeRef.current && myGen === gen) {
+      await sleep(80);
+    }
   }
 }
 
