@@ -11,6 +11,9 @@ import {
   stopMic,
   restartMic,
   keepListening,
+  isGarbageTranscript,
+  isNearDuplicate,
+  cleanTranscript,
 } from './speech';
 
 /* ─── Translation ───────────────────────────────────────────────────── */
@@ -189,9 +192,11 @@ export default function App() {
     const n = norm(text);
     if (!n) return true;
     const now = Date.now();
-    recentLockRef.current = recentLockRef.current.filter((u) => now - u.t < 8000);
-    if (recentLockRef.current.some((u) => u.n === n)) return true;
-    recentLockRef.current.push({ n, t: now });
+    recentLockRef.current = recentLockRef.current.filter((u) => now - u.t < 12000);
+    if (recentLockRef.current.some((u) => u.n === n || isNearDuplicate(u.raw, text))) {
+      return true;
+    }
+    recentLockRef.current.push({ n, raw: text, t: now });
     if (recentLockRef.current.length > 30) {
       recentLockRef.current = recentLockRef.current.slice(-20);
     }
@@ -219,21 +224,26 @@ export default function App() {
 
   /* ── Listen mode ── */
   const addListenLine = useCallback(async (text, lang) => {
-    if (isRecentDupe(text) || !remember(text, listenSeenRef)) return;
+    const cleaned = cleanTranscript(text);
+    if (!cleaned || isGarbageTranscript(cleaned)) return;
+    if (isRecentDupe(cleaned) || !remember(cleaned, listenSeenRef)) return;
     const id = nextId();
     const time = formatTime();
     setListenLines((prev) => [...prev, {
-      id, text, translation: null, translating: true, lang, time,
+      id, text: cleaned, translation: null, translating: true, lang, time,
     }]);
     setListenInterim('');
 
     const toEn = lang.key === 'en'
-      ? text
-      : await translate(text, lang.apiCode, 'en');
+      ? cleaned
+      : await translate(cleaned, lang.apiCode, 'en');
+
+    // Don't show English that is also garbage / identical noise
+    const english = toEn && !isGarbageTranscript(toEn) ? toEn : cleaned;
 
     setListenLines((prev) => prev.map((line) => (
       line.id === id
-        ? { ...line, translation: toEn || text, translating: false }
+        ? { ...line, translation: english, translating: false }
         : line
     )));
   }, [remember, isRecentDupe]);
@@ -267,18 +277,21 @@ export default function App() {
       onPhase: (phase) => {
         if (!listenActiveRef.current) return;
         const name = listenLangRef.current?.name || lang.name;
-        if (phase === 'hearing') setListenStatus(`Listening · ${name}`);
-        else if (phase === 'transcribing') setListenStatus(`Transcribing · ${name}`);
+        if (phase === 'hearing') setListenStatus(`Listening for speech · ${name}`);
+        else if (phase === 'transcribing') setListenStatus(`Got it — translating…`);
         else setListenStatus(`Listening · ${name}`);
       },
       onInterim: (t) => {
-        if (listenActiveRef.current) setListenInterim(t || '');
+        if (!listenActiveRef.current) return;
+        setListenInterim(t === '…' ? 'Hearing…' : (t || ''));
       },
       onFinal: async (text) => {
         if (!listenActiveRef.current) return;
         setListenInterim('');
+        const cleaned = cleanTranscript(text);
+        if (!cleaned || isGarbageTranscript(cleaned)) return;
         const current = listenLangRef.current || lang;
-        const guessed = detectLanguageFromText(text);
+        const guessed = detectLanguageFromText(cleaned);
         const useLang = (guessed && guessed.key !== '?' && guessed.key !== 'en' && UNIQUE_SCRIPT_KEYS.has(guessed.key))
           ? guessed
           : current;
@@ -286,7 +299,7 @@ export default function App() {
           listenLangRef.current = useLang;
           setListenLang(useLang);
         }
-        void addListenLine(text, useLang.key === 'en' ? ENGLISH : useLang);
+        void addListenLine(cleaned, useLang.key === 'en' ? ENGLISH : useLang);
       },
       onError: (msg) => {
         setMicError(msg);
@@ -376,35 +389,40 @@ export default function App() {
   }, []);
 
   const addConverseMessage = useCallback(async (who, said, fromCode, toCode, speakLang) => {
-    if (isRecentDupe(said) || !remember(said, seenRef)) return;
+    const cleaned = cleanTranscript(said);
+    if (!cleaned || isGarbageTranscript(cleaned)) return;
+    if (isRecentDupe(cleaned) || !remember(cleaned, seenRef)) return;
     const id = nextId();
     setMessages((prev) => [...prev, {
-      id, who, said, translation: null, translating: true,
+      id, who, said: cleaned, translation: null, translating: true,
     }]);
     setTurnInterim('');
 
-    const translated = await translate(said, fromCode, toCode);
+    const translated = await translate(cleaned, fromCode, toCode);
+    const out = translated && !isGarbageTranscript(translated) ? translated : cleaned;
     setMessages((prev) => prev.map((m) => (
       m.id === id
-        ? { ...m, translation: translated || said, translating: false }
+        ? { ...m, translation: out, translating: false }
         : m
     )));
-    if (translated && translated !== said) speak(translated, speakLang);
+    if (out && out !== cleaned) speak(out, speakLang);
   }, [remember, speak, isRecentDupe]);
 
   const handleConverseFinal = useCallback(async (text) => {
     if (!converseActiveRef.current) return;
     setTurnInterim('');
+    const cleaned = cleanTranscript(text);
+    if (!cleaned || isGarbageTranscript(cleaned)) return;
     const lang = languageRef.current;
     const focus = converseFocusRef.current;
     const listeningForYou = focus === 'you';
 
     if (listeningForYou) {
-      if (!isEnglish(text) && looksLikeForeign(text, lang)) {
-        void addConverseMessage('them', text, lang.apiCode, 'en', ENGLISH.speechCode);
+      if (!isEnglish(cleaned) && looksLikeForeign(cleaned, lang)) {
+        void addConverseMessage('them', cleaned, lang.apiCode, 'en', ENGLISH.speechCode);
         return;
       }
-      void addConverseMessage('you', text, 'en', lang.apiCode, lang.speechCode);
+      void addConverseMessage('you', cleaned, 'en', lang.apiCode, lang.speechCode);
       converseFocusRef.current = 'them';
       setConverseFocus('them');
       setConverseStatus(`On · ${lang.name} — speak anytime`);
@@ -413,13 +431,13 @@ export default function App() {
     }
 
     // Listening for them
-    if (isEnglish(text) && !looksLikeForeign(text, lang)) {
-      void addConverseMessage('you', text, 'en', lang.apiCode, lang.speechCode);
+    if (isEnglish(cleaned) && !looksLikeForeign(cleaned, lang)) {
+      void addConverseMessage('you', cleaned, 'en', lang.apiCode, lang.speechCode);
       return;
     }
 
-    if (looksLikeForeign(text, lang) || !UNIQUE_SCRIPT_KEYS.has(lang.key)) {
-      void addConverseMessage('them', text, lang.apiCode, 'en', ENGLISH.speechCode);
+    if (looksLikeForeign(cleaned, lang) || !UNIQUE_SCRIPT_KEYS.has(lang.key)) {
+      void addConverseMessage('them', cleaned, lang.apiCode, 'en', ENGLISH.speechCode);
       converseFocusRef.current = 'you';
       setConverseFocus('you');
       setConverseStatus('On · English — speak anytime');
