@@ -11,6 +11,7 @@
 1. Open **Chrome** → **https://jpro99.github.io/Translator-/**
 2. **Add to Home Screen** (PWA) for offline UI + cached assets
 3. Choose a mode:
+   - **Expert Listener** — tour guide / one speaker. Continuous listen, live translation (perfect for bus tours).
    - **Table Mode** — phone face-up between two people. Split screen; top half rotated 180° so each person reads upright.
    - **Earbuds** — one earbud each. Person A = left, Person B = right. Hear only your translation.
 4. Tap **Start** / **Inizia** → allow microphone
@@ -18,6 +19,17 @@
 6. Speak — auto-detect languages, translate both ways. Chip shows provider (e.g. `via MyMemory`).
 
 ## Modes
+
+### Expert Listener (bus tour)
+One speaker (tour guide) talks continuously. You only listen — no tapping, no turn-taking.
+
+1. Tap **Expert Listener** → **Start listening**
+2. Guide speaks Italian (or any language) — auto-detected per phrase
+3. Rolling transcript: original + huge translation; newest line highlighted
+4. Toggle **🔊** to hear translations in your ear while watching sights
+5. Mic level meter + **Listening…** status; big **Stop** when done
+
+Default: translate into **English**. Tap language chips to override target or hint guide language.
 
 ### Table Mode
 Place the phone on the table between you. Person A sits at the bottom, Person B at the top. Each side shows:

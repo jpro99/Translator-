@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import TableMode from './TableMode';
 import EarbudMode from './EarbudMode';
+import ExpertListenerMode from './ExpertListenerMode';
 import { bilingual, uiLocale } from './i18n';
 import { onOnlineRetry, dequeueRetry } from './retryQueue';
 import { translateWithDetection } from './translate';
@@ -29,6 +30,7 @@ export default function App() {
 
   if (mode === 'table') return <TableMode onBack={() => setMode('home')} />;
   if (mode === 'earbuds') return <EarbudMode onBack={() => setMode('home')} />;
+  if (mode === 'expert') return <ExpertListenerMode onBack={() => setMode('home')} />;
 
   return (
     <div className="app home-app">
@@ -55,6 +57,16 @@ export default function App() {
               {locale === 'it'
                 ? 'Telefono al centro. Schermo diviso, testo capovolto per l\'altra persona.'
                 : 'Phone between you. Split screen — their side reads upright.'}
+            </span>
+          </button>
+
+          <button type="button" className="mode-card mode-card-expert" onClick={() => setMode('expert')}>
+            <span className="mode-card-icon">👂</span>
+            <span className="mode-card-name">Expert Listener</span>
+            <span className="mode-card-desc">
+              {locale === 'it'
+                ? 'Guida turistica — ascolto continuo, traduzione in tempo reale.'
+                : 'Tour guide mode — continuous listen, live translation.'}
             </span>
           </button>
 

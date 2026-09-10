@@ -41,6 +41,14 @@ export const STR = {
     en: (p) => `via ${p}`,
     it: (p) => `tramite ${p}`,
   },
+  startListen: {
+    en: 'Start listening',
+    it: 'Inizia ascolto',
+  },
+  stopListen: {
+    en: 'Stop',
+    it: 'Ferma',
+  },
 };
 
 export function t(key, locale = 'en', ...args) {

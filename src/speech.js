@@ -247,11 +247,12 @@ function recognizeUtterance({ lang, onInterim, onFinal, myGen }) {
 }
 
 async function vadLoop({
-  activeRef, getLang, onInterim, onFinal, onPhase, myGen, useWhisper, transcribeAudioFn,
+  activeRef, getLang, onInterim, onFinal, onPhase, onLevel, myGen, useWhisper, transcribeAudioFn,
+  outdoor = false,
 }) {
   const levelBuf = new Uint8Array(media.analyser.fftSize);
-  const SPEECH_ON = 0.014;
-  const SPEECH_OFF = 0.007;
+  const SPEECH_ON = outdoor ? 0.010 : 0.014;
+  const SPEECH_OFF = outdoor ? 0.005 : 0.007;
   const START_HOLD_MS = 180;
   const END_SILENCE_MS = 700;
   const POLL_MS = 60;
@@ -288,6 +289,7 @@ async function vadLoop({
     }
 
     const level = voiceLevel(media.analyser, levelBuf);
+    onLevel?.(level);
 
     if (!inSpeech) {
       if (level >= SPEECH_ON) {
@@ -371,8 +373,10 @@ export async function keepListening({
   onFinal,
   onError,
   onPhase,
+  onLevel,
   onModel,
   onEngine,
+  outdoor = false,
 }) {
   if (!speechSupported()) {
     onError?.('no-mic');
@@ -419,8 +423,8 @@ export async function keepListening({
 
   try {
     await vadLoop({
-      activeRef, getLang, onInterim, onFinal, onPhase, myGen, useWhisper,
-      transcribeAudioFn: transcribeAudio,
+      activeRef, getLang, onInterim, onFinal, onPhase, onLevel, myGen, useWhisper,
+      transcribeAudioFn: transcribeAudio, outdoor,
     });
   } finally {
     if (myGen === gen) {
