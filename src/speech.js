@@ -1,6 +1,6 @@
 /**
- * Speech capture: on-device Whisper (primary) → Web Speech fallback.
- * VAD avoids Android beep loops; records PCM for Whisper.
+ * Speech capture: Web Speech (reliable on Android) with optional Whisper.
+ * VAD + MediaRecorder recording for Whisper path.
  */
 import { resampleTo16k, whisperSupported } from './audioUtils';
 
@@ -21,6 +21,10 @@ function getSR() {
   return window.SpeechRecognition || window.webkitSpeechRecognition || null;
 }
 
+export function isAndroid() {
+  return /android/i.test(navigator.userAgent);
+}
+
 export function speechSupported() {
   return whisperSupported() || !!getSR();
 }
@@ -32,6 +36,7 @@ function teardownMedia() {
   try { media.analyser?.disconnect(); } catch {}
   try { media.source?.disconnect(); } catch {}
   try { if (media.processor) media.processor.onaudioprocess = null; } catch {}
+  try { if (media.recorder?.state === 'recording') media.recorder.stop(); } catch {}
   try { media.ctx?.close(); } catch {}
   try { media.stream?.getTracks?.().forEach((t) => t.stop()); } catch {}
   media = null;
@@ -155,9 +160,10 @@ async function ensureVadMedia() {
   const source = ctx.createMediaStreamSource(stream);
   const analyser = ctx.createAnalyser();
   analyser.fftSize = 2048;
-  analyser.smoothingTimeConstant = 0.85;
+  analyser.smoothingTimeConstant = 0.75;
   source.connect(analyser);
 
+  // ScriptProcessor backup (unreliable on some Android builds)
   const processor = ctx.createScriptProcessor(4096, 1, 1);
   const mute = ctx.createGain();
   mute.gain.value = 0;
@@ -167,11 +173,44 @@ async function ensureVadMedia() {
 
   const recordChunks = [];
   let recording = false;
-
   processor.onaudioprocess = (e) => {
     if (!recording) return;
     recordChunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
   };
+
+  // MediaRecorder — more reliable on Android
+  let recorder = null;
+  let mrChunks = [];
+  const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+    ? 'audio/webm;codecs=opus'
+    : (MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '');
+
+  async function stopRecordPcm() {
+    recording = false;
+    const { sampleRate } = ctx;
+
+    // Try MediaRecorder first
+    if (recorder && recorder.state !== 'inactive') {
+      try {
+        const blob = await new Promise((resolve, reject) => {
+          const chunks = [...mrChunks];
+          recorder.onstop = () => {
+            resolve(new Blob(chunks, { type: recorder.mimeType || 'audio/webm' }));
+          };
+          recorder.onerror = reject;
+          try { recorder.stop(); } catch (e) { reject(e); }
+        });
+        if (blob.size > 500) {
+          const buf = await blob.arrayBuffer();
+          const audioBuffer = await ctx.decodeAudioData(buf.slice(0));
+          const ch = audioBuffer.getChannelData(0);
+          return resampleTo16k([ch], audioBuffer.sampleRate);
+        }
+      } catch {}
+    }
+
+    return resampleTo16k(recordChunks, sampleRate);
+  }
 
   media = {
     stream,
@@ -180,19 +219,30 @@ async function ensureVadMedia() {
     analyser,
     processor,
     mute,
+    recorder: null,
     startRecord: () => {
       recordChunks.length = 0;
+      mrChunks = [];
       recording = true;
+      if (typeof MediaRecorder !== 'undefined' && mimeType) {
+        try {
+          recorder = new MediaRecorder(stream, { mimeType });
+          media.recorder = recorder;
+          recorder.ondataavailable = (ev) => {
+            if (ev.data?.size) mrChunks.push(ev.data);
+          };
+          recorder.start(200);
+        } catch {
+          recorder = null;
+        }
+      }
     },
-    stopRecord: () => {
-      recording = false;
-      return resampleTo16k(recordChunks, ctx.sampleRate);
-    },
+    stopRecord: stopRecordPcm,
   };
   return media;
 }
 
-function recognizeUtterance({ lang, onInterim, onFinal, myGen }) {
+function recognizeUtterance({ lang, onInterim, onFinal, myGen, continuous = true }) {
   const SR = getSR();
   if (!SR) return Promise.resolve();
 
@@ -212,7 +262,7 @@ function recognizeUtterance({ lang, onInterim, onFinal, myGen }) {
     const rec = new SR();
     activeRec = rec;
     rec.lang = lang || 'en-US';
-    rec.continuous = true;
+    rec.continuous = continuous;
     rec.interimResults = true;
 
     const maxTimer = setTimeout(() => {
@@ -246,25 +296,58 @@ function recognizeUtterance({ lang, onInterim, onFinal, myGen }) {
   });
 }
 
+async function runWebSpeechBurst({ getLang, onInterim, onFinal, onPhase, myGen }) {
+  const { speechCode, fallbackCodes = [] } = resolveLang(getLang);
+  const langs = [speechCode, ...fallbackCodes, 'it-IT', 'en-US'].filter(Boolean);
+  const unique = [...new Set(langs)];
+
+  onPhase?.('webspeech');
+  let accepted = false;
+  for (const lang of unique) {
+    if (!accepted && myGen === gen) {
+      await recognizeUtterance({
+        lang,
+        onInterim,
+        onFinal: async (text) => {
+          if (isGarbageTranscript(text)) return;
+          accepted = true;
+          onPhase?.('transcribing');
+          await onFinal?.(text);
+        },
+        myGen,
+      });
+    }
+    if (accepted) break;
+  }
+  return accepted;
+}
+
 async function vadLoop({
-  activeRef, getLang, onInterim, onFinal, onPhase, onLevel, myGen, useWhisper, transcribeAudioFn,
-  outdoor = false,
+  activeRef, getLang, onInterim, onFinal, onPhase, onLevel, onStatus, myGen,
+  useWhisperRef, transcribeAudioFn, outdoor = false,
 }) {
   const levelBuf = new Uint8Array(media.analyser.fftSize);
-  const SPEECH_ON = outdoor ? 0.010 : 0.014;
-  const SPEECH_OFF = outdoor ? 0.005 : 0.007;
-  const START_HOLD_MS = 180;
-  const END_SILENCE_MS = 700;
-  const POLL_MS = 60;
+  const SPEECH_ON = outdoor ? 0.005 : 0.010;
+  const SPEECH_OFF = outdoor ? 0.0025 : 0.005;
+  const START_HOLD_MS = outdoor ? 100 : 150;
+  const END_SILENCE_MS = outdoor ? 900 : 700;
+  const POLL_MS = 50;
   const MAX_UTTERANCE_MS = 28000;
+  const MIN_PCM_SAMPLES = 4000;
+  const SILENT_LEVEL = 0.0015;
+  const SILENT_WARN_MS = 8000;
 
   let speechHold = 0;
   let silenceHold = 0;
   let inSpeech = false;
   let recognizing = false;
   let utteranceStart = 0;
+  let whisperMisses = 0;
+  let silentSince = Date.now();
+  let hadAnyLevel = false;
 
   onPhase?.('hearing');
+  onStatus?.('mic ok · waiting for speech');
   onInterim?.('');
 
   while (activeRef.current && myGen === gen) {
@@ -290,10 +373,22 @@ async function vadLoop({
 
     const level = voiceLevel(media.analyser, levelBuf);
     onLevel?.(level);
+    if (level > SILENT_LEVEL) {
+      hadAnyLevel = true;
+      silentSince = Date.now();
+    } else if (Date.now() - silentSince > SILENT_WARN_MS && hadAnyLevel === false) {
+      onStatus?.('mic silent — check permission');
+    }
+
+    const useWhisper = useWhisperRef.current;
 
     if (!inSpeech) {
       if (level >= SPEECH_ON) {
         speechHold += POLL_MS;
+        if (speechHold >= START_HOLD_MS / 2) {
+          onInterim?.('Heard something…');
+          onStatus?.('vad speech detected');
+        }
       } else if (level < SPEECH_OFF) {
         speechHold = 0;
       }
@@ -303,32 +398,21 @@ async function vadLoop({
         silenceHold = 0;
         utteranceStart = Date.now();
         onPhase?.('hearing');
-        if (useWhisper) media.startRecord();
-        else {
+        onStatus?.(useWhisper ? 'recording · whisper' : 'webspeech listening');
+
+        if (useWhisper) {
+          media.startRecord();
+        } else {
           recognizing = true;
-          const { speechCode, fallbackCodes = [] } = resolveLang(getLang);
-          const langs = [speechCode, ...fallbackCodes].filter(Boolean);
-          let accepted = false;
-          for (const lang of langs) {
-            if (!activeRef.current || myGen !== gen || accepted) break;
-            await recognizeUtterance({
-              lang,
-              onInterim: (t) => { if (activeRef.current && myGen === gen) onInterim?.(t); },
-              onFinal: async (text) => {
-                if (!activeRef.current || myGen !== gen || isGarbageTranscript(text)) return;
-                accepted = true;
-                onPhase?.('transcribing');
-                await onFinal?.(text);
-                if (activeRef.current && myGen === gen) onPhase?.('hearing');
-              },
-              myGen,
-            });
-            if (accepted) break;
-          }
+          await runWebSpeechBurst({
+            getLang, onInterim, onFinal, onPhase, myGen,
+          });
           recognizing = false;
           inSpeech = false;
           onInterim?.('');
-          await sleep(450);
+          onPhase?.('hearing');
+          onStatus?.('mic ok · waiting for speech');
+          await sleep(350);
         }
       }
     } else if (useWhisper) {
@@ -336,26 +420,53 @@ async function vadLoop({
         silenceHold += POLL_MS;
       } else {
         silenceHold = 0;
-        onInterim?.('…');
+        onInterim?.('Recording…');
       }
 
       const timedOut = Date.now() - utteranceStart > MAX_UTTERANCE_MS;
       if (silenceHold >= END_SILENCE_MS || timedOut) {
         inSpeech = false;
         onPhase?.('transcribing');
-        const pcm = media.stopRecord();
-        if (pcm.length > 8000) {
+        onStatus?.('whisper running…');
+        const pcm = await media.stopRecord();
+        let gotText = false;
+
+        if (pcm.length >= MIN_PCM_SAMPLES && transcribeAudioFn) {
           try {
             const { whisperLang } = resolveLang(getLang);
-            const text = await transcribeAudioFn?.(pcm, { language: whisperLang || 'auto' });
+            const text = await transcribeAudioFn(pcm, { language: whisperLang || 'auto' });
             if (text && !isGarbageTranscript(text) && activeRef.current && myGen === gen) {
+              gotText = true;
+              whisperMisses = 0;
+              onStatus?.('transcribed · translating');
               await onFinal?.(text);
             }
-          } catch {}
+          } catch {
+            onStatus?.('whisper failed');
+          }
         }
+
+        if (!gotText) {
+          whisperMisses += 1;
+          onStatus?.(`whisper miss ${whisperMisses} — trying webspeech`);
+          if (whisperMisses >= 1) {
+            useWhisperRef.current = false;
+            engineMode = 'webspeech';
+          }
+          recognizing = true;
+          const accepted = await runWebSpeechBurst({
+            getLang, onInterim, onFinal, onPhase, myGen,
+          });
+          recognizing = false;
+          if (!accepted && pcm.length < MIN_PCM_SAMPLES) {
+            onStatus?.('no audio captured — speak louder');
+          }
+        }
+
         onInterim?.('');
         onPhase?.('hearing');
-        await sleep(450);
+        onStatus?.('mic ok · waiting for speech');
+        await sleep(350);
       }
     }
 
@@ -374,9 +485,11 @@ export async function keepListening({
   onError,
   onPhase,
   onLevel,
+  onStatus,
   onModel,
   onEngine,
   outdoor = false,
+  profile = 'default',
 }) {
   if (!speechSupported()) {
     onError?.('no-mic');
@@ -395,16 +508,29 @@ export async function keepListening({
     return;
   }
 
-  let useWhisper = false;
-  let transcribeAudio;
-  try {
-    const whisper = await import('./whisper');
-    await whisper.loadWhisper((info) => onModel?.(info));
-    transcribeAudio = whisper.transcribeAudio;
-    useWhisper = true;
-    engineMode = 'whisper';
-    onEngine?.('whisper');
-  } catch {
+  onStatus?.('mic ok');
+
+  // Expert Listener on Android: Web Speech first (Whisper WASM + ScriptProcessor unreliable)
+  const preferWebSpeech = profile === 'expert' && isAndroid();
+  const useWhisperRef = { current: false };
+  let transcribeAudio = null;
+
+  if (!preferWebSpeech) {
+    try {
+      onStatus?.('loading whisper…');
+      const whisper = await import('./whisper');
+      await whisper.loadWhisper((info) => onModel?.(info));
+      transcribeAudio = whisper.transcribeAudio;
+      useWhisperRef.current = true;
+      engineMode = 'whisper';
+      onEngine?.('whisper');
+      onStatus?.('mic ok · whisper ready');
+    } catch {
+      onStatus?.('whisper unavailable');
+    }
+  }
+
+  if (!useWhisperRef.current) {
     if (!getSR()) {
       onError?.('no-speech');
       activeRef.current = false;
@@ -414,6 +540,7 @@ export async function keepListening({
     engineMode = 'webspeech';
     onEngine?.('webspeech');
     onModel?.({ status: 'ready', progress: 100, device: 'webspeech' });
+    onStatus?.('mic ok · webspeech ready');
   }
 
   if (!activeRef.current || myGen !== gen) {
@@ -423,8 +550,8 @@ export async function keepListening({
 
   try {
     await vadLoop({
-      activeRef, getLang, onInterim, onFinal, onPhase, onLevel, myGen, useWhisper,
-      transcribeAudioFn: transcribeAudio, outdoor,
+      activeRef, getLang, onInterim, onFinal, onPhase, onLevel, onStatus, myGen,
+      useWhisperRef, transcribeAudioFn: transcribeAudio, outdoor,
     });
   } finally {
     if (myGen === gen) {

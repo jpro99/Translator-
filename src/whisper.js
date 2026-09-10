@@ -1,16 +1,17 @@
 /**
  * On-device Whisper STT via Transformers.js (WebGPU → WASM fallback).
- * No Google / cloud speech required.
  */
 import { pipeline, env } from '@huggingface/transformers';
 
-// Side-effect: configure env once
 const base = import.meta.env.BASE_URL || '/';
 env.allowLocalModels = true;
 env.localModelPath = `${base}models/`;
 env.useBrowserCache = true;
 
 const MODEL_ID = 'Xenova/whisper-base';
+const LOAD_TIMEOUT_MS = 45000;
+const TRANSCRIBE_TIMEOUT_MS = 12000;
+
 let transcriber = null;
 let loadPromise = null;
 let backend = 'wasm';
@@ -19,11 +20,20 @@ export function getWhisperBackend() {
   return backend;
 }
 
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(`${label} timeout`)), ms);
+    }),
+  ]);
+}
+
 export async function loadWhisper(onProgress) {
   if (transcriber) return transcriber;
   if (loadPromise) return loadPromise;
 
-  loadPromise = (async () => {
+  loadPromise = withTimeout((async () => {
     const devices = [];
     if (typeof navigator !== 'undefined' && 'gpu' in navigator) {
       try {
@@ -61,9 +71,14 @@ export async function loadWhisper(onProgress) {
     }
     loadPromise = null;
     throw lastErr || new Error('Whisper failed to load');
-  })();
+  })(), LOAD_TIMEOUT_MS, 'Whisper load');
 
-  return loadPromise;
+  try {
+    return await loadPromise;
+  } catch (e) {
+    loadPromise = null;
+    throw e;
+  }
 }
 
 export async function transcribeAudio(float32_16k, { language } = {}) {
@@ -72,9 +87,12 @@ export async function transcribeAudio(float32_16k, { language } = {}) {
   if (language && language !== 'auto') {
     opts.language = language.split('-')[0];
   }
-  const result = await transcriber(float32_16k, opts);
-  const text = (result?.text || '').trim();
-  return text;
+  const result = await withTimeout(
+    transcriber(float32_16k, opts),
+    TRANSCRIBE_TIMEOUT_MS,
+    'Whisper transcribe',
+  );
+  return (result?.text || '').trim();
 }
 
 export function unloadWhisper() {

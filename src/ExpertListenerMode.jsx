@@ -21,6 +21,7 @@ function formatTime(d = new Date()) {
 }
 
 const PINNED = ['it', 'en', 'es', 'fr', 'de', 'pt'];
+const SOURCE_HINT_KEY = 'expert_source_hint_v1';
 
 export default function ExpertListenerMode({ onBack }) {
   const locale = uiLocale();
@@ -31,6 +32,7 @@ export default function ExpertListenerMode({ onBack }) {
   const [micLevel, setMicLevel] = useState(0);
   const [engine, setEngine] = useState('');
   const [modelStatus, setModelStatus] = useState('');
+  const [debugStatus, setDebugStatus] = useState('');
   const [micError, setMicError] = useState(null);
   const [targetLang, setTargetLang] = useState(ENGLISH);
   const [sourceHint, setSourceHint] = useState(null);
@@ -44,6 +46,14 @@ export default function ExpertListenerMode({ onBack }) {
   const ttsRef = useRef(false);
   const seenRef = useRef(new Set());
   const listEndRef = useRef(null);
+  const silentWarnedRef = useRef(false);
+
+  useEffect(() => {
+    // Never sticky-wrong guide language from old sessions
+    try { localStorage.removeItem(SOURCE_HINT_KEY); } catch {}
+    setSourceHint(null);
+    sourceRef.current = null;
+  }, []);
 
   useEffect(() => { targetRef.current = targetLang; }, [targetLang]);
   useEffect(() => { sourceRef.current = sourceHint; }, [sourceHint]);
@@ -78,6 +88,7 @@ export default function ExpertListenerMode({ onBack }) {
     const detected = detectLanguageFromText(cleaned);
     const sourceLang = sourceRef.current || detected;
 
+    // Show transcript immediately — translate in background
     setLines((prev) => [...prev, {
       id,
       text: cleaned,
@@ -90,9 +101,10 @@ export default function ExpertListenerMode({ onBack }) {
       isLive: true,
     }]);
     setInterim('');
+    setDebugStatus('translate…');
 
     const result = await translateWithDetection(cleaned, 'auto', targetRef.current.apiCode)
-      || await translateWithDetection(cleaned, sourceLang.apiCode, targetRef.current.apiCode);
+      || await translateWithDetection(cleaned, sourceLang?.apiCode || 'auto', targetRef.current.apiCode);
 
     if (!result?.translation) {
       enqueueRetry({
@@ -109,6 +121,7 @@ export default function ExpertListenerMode({ onBack }) {
           }
           : { ...l, isLive: false }
       )));
+      setDebugStatus('translate failed');
       return;
     }
 
@@ -119,7 +132,8 @@ export default function ExpertListenerMode({ onBack }) {
           translation: result.translation,
           provider: result.provider,
           sourceLang: result.detectedLang
-            ? (LANGUAGE_LIST.find((x) => x.apiCode === result.detectedLang) || sourceLang)
+            ? (LANGUAGE_LIST.find((x) => x.apiCode === result.detectedLang
+              || x.key === result.detectedLang) || sourceLang)
             : sourceLang,
           translating: false,
           failed: false,
@@ -127,6 +141,7 @@ export default function ExpertListenerMode({ onBack }) {
         }
         : { ...l, isLive: false }
     )));
+    setDebugStatus(`done · ${result.provider || 'ok'}`);
 
     if (ttsRef.current && result.translation) {
       speakAloud(result.translation, targetRef.current.speechCode);
@@ -167,6 +182,8 @@ export default function ExpertListenerMode({ onBack }) {
     setPhase('idle');
     setInterim('');
     setMicLevel(0);
+    setDebugStatus('');
+    silentWarnedRef.current = false;
     stopMic();
   }, []);
 
@@ -176,19 +193,32 @@ export default function ExpertListenerMode({ onBack }) {
       return;
     }
     setMicError(null);
+    silentWarnedRef.current = false;
     seenRef.current.clear();
     activeRef.current = true;
     setActive(true);
     setPhase('loading');
+    setDebugStatus('starting…');
 
     await keepListening({
       activeRef,
       outdoor: true,
-      getLang: () => ({
-        speechCode: sourceRef.current?.speechCode || 'it-IT',
-        fallbackCodes: ['en-US', 'es-ES', 'fr-FR'],
-        whisperLang: 'auto',
-      }),
+      profile: 'expert',
+      getLang: () => {
+        if (sourceRef.current) {
+          return {
+            speechCode: sourceRef.current.speechCode,
+            fallbackCodes: ['it-IT', 'en-US', 'es-ES', 'fr-FR', 'de-DE'],
+            whisperLang: 'auto',
+          };
+        }
+        // Auto-detect: try common tour languages
+        return {
+          speechCode: 'it-IT',
+          fallbackCodes: ['en-US', 'es-ES', 'fr-FR', 'de-DE', 'pt-BR'],
+          whisperLang: 'auto',
+        };
+      },
       onModel: (info) => {
         if (info.status === 'loading') {
           setModelStatus(
@@ -196,9 +226,10 @@ export default function ExpertListenerMode({ onBack }) {
               ? `Caricamento… ${info.progress || 0}%`
               : `Loading speech… ${info.progress || 0}%`,
           );
+          setDebugStatus(`loading model ${info.progress || 0}%`);
         } else if (info.status === 'ready') {
           setModelStatus('');
-          setEngine(getEngineMode() || '');
+          setEngine(getEngineMode() || info.device || '');
           setPhase('hearing');
         }
       },
@@ -206,12 +237,35 @@ export default function ExpertListenerMode({ onBack }) {
       onPhase: (p) => {
         if (p === 'hearing') setPhase('hearing');
         else if (p === 'transcribing') setPhase('translating');
+        else if (p === 'webspeech') setPhase('hearing');
       },
-      onLevel: (lvl) => setMicLevel(lvl),
-      onInterim: (txt) => setInterim(txt || ''),
+      onLevel: (lvl) => {
+        setMicLevel(lvl);
+        if (lvl < 0.0015 && activeRef.current && !silentWarnedRef.current) {
+          // defer warning — onStatus handles after sustained silence
+        }
+      },
+      onStatus: (msg) => {
+        setDebugStatus(msg);
+        if (msg?.includes('mic silent') && !silentWarnedRef.current) {
+          silentWarnedRef.current = true;
+          setMicError(bilingual('micSilent'));
+        }
+      },
+      onInterim: (txt) => {
+        if (!txt) {
+          setInterim('');
+          return;
+        }
+        if (txt === '…' || txt === 'Recording…') {
+          setInterim(locale === 'it' ? t('heardSomething', 'it') : t('heardSomething', 'en'));
+        } else {
+          setInterim(txt);
+        }
+      },
       onFinal: (text) => addLine(text),
-      onError: () => {
-        setMicError(bilingual('micDenied'));
+      onError: (code) => {
+        setMicError(code === 'mic-denied' ? bilingual('micDenied') : bilingual('micRequired'));
         stop();
       },
     });
@@ -234,7 +288,9 @@ export default function ExpertListenerMode({ onBack }) {
     translating: locale === 'it' ? 'Traduzione…' : 'Translating…',
   }[phase];
 
-  const levelPct = Math.min(100, Math.round(micLevel * 2800));
+  const levelPct = Math.min(100, Math.round(micLevel * 3200));
+
+  const engineLabel = engine === 'whisper' ? 'On-device' : (engine === 'webspeech' ? 'Web Speech' : '');
 
   return (
     <div className="mode-screen expert-mode">
@@ -269,9 +325,11 @@ export default function ExpertListenerMode({ onBack }) {
           className="lang-chip lang-chip-muted"
           onClick={() => setShowLangPicker('source')}
         >
-          {sourceHint ? `${sourceHint.flag} ${sourceHint.name}` : (locale === 'it' ? 'Auto lingua' : 'Auto-detect')} ▾
+          {sourceHint
+            ? `${sourceHint.flag} ${sourceHint.name} ▾`
+            : `🌐 ${locale === 'it' ? 'Auto lingua' : 'Auto-detect'} ▾`}
         </button>
-        {engine && <span className="engine-chip">{engine === 'whisper' ? 'On-device' : 'Web Speech'}</span>}
+        {engineLabel && <span className="engine-chip">{engineLabel}</span>}
       </div>
 
       <div className="expert-scroll">
@@ -314,8 +372,11 @@ export default function ExpertListenerMode({ onBack }) {
         })}
 
         {interim && (
-          <article className="expert-line expert-line-interim">
-            <p className="expert-original">{interim === '…' ? '…' : interim}</p>
+          <article className="expert-line expert-line-interim expert-line-live">
+            <p className="expert-original">{interim}</p>
+            <p className="expert-trans is-pending" style={{ fontSize: '1rem' }}>
+              {locale === 'it' ? 'Riconoscimento…' : 'Recognizing…'}
+            </p>
           </article>
         )}
         <div ref={listEndRef} />
@@ -323,13 +384,18 @@ export default function ExpertListenerMode({ onBack }) {
 
       <div className="expert-bar">
         {active && (
-          <div className="expert-status-row">
-            <span className={`expert-pulse ${phase === 'hearing' ? 'expert-pulse-on' : ''}`} />
-            <span className="expert-status-text">{phaseLabel}</span>
-            <div className="mic-meter" aria-hidden="true">
-              <div className="mic-meter-fill" style={{ width: `${levelPct}%` }} />
+          <>
+            <div className="expert-status-row">
+              <span className={`expert-pulse ${phase === 'hearing' ? 'expert-pulse-on' : ''}`} />
+              <span className="expert-status-text">{phaseLabel}</span>
+              <div className="mic-meter" aria-hidden="true">
+                <div className="mic-meter-fill" style={{ width: `${levelPct}%` }} />
+              </div>
             </div>
-          </div>
+            {debugStatus && (
+              <p className="expert-debug">{debugStatus}</p>
+            )}
+          </>
         )}
 
         {lines.length > 0 && !active && (
@@ -368,6 +434,8 @@ export default function ExpertListenerMode({ onBack }) {
                 className="lang-row lang-row-auto"
                 onClick={() => {
                   setSourceHint(null);
+                  sourceRef.current = null;
+                  try { localStorage.removeItem(SOURCE_HINT_KEY); } catch {}
                   setShowLangPicker(null);
                   setLangSearch('');
                 }}
@@ -391,8 +459,12 @@ export default function ExpertListenerMode({ onBack }) {
                     type="button"
                     className="lang-row"
                     onClick={() => {
-                      if (showLangPicker === 'target') setTargetLang(lang);
-                      else setSourceHint(lang);
+                      if (showLangPicker === 'target') {
+                        setTargetLang(lang);
+                      } else {
+                        setSourceHint(lang);
+                        sourceRef.current = lang;
+                      }
                       setShowLangPicker(null);
                       setLangSearch('');
                     }}
@@ -413,8 +485,12 @@ export default function ExpertListenerMode({ onBack }) {
                   type="button"
                   className="lang-row"
                   onClick={() => {
-                    if (showLangPicker === 'target') setTargetLang(lang);
-                    else setSourceHint(lang);
+                    if (showLangPicker === 'target') {
+                      setTargetLang(lang);
+                    } else {
+                      setSourceHint(lang);
+                      sourceRef.current = lang;
+                    }
                     setShowLangPicker(null);
                     setLangSearch('');
                   }}

@@ -1093,6 +1093,16 @@ body {
   font-size: 1.375rem;
 }
 
+.expert-debug {
+  font-size: 0.6875rem;
+  font-family: ui-monospace, monospace;
+  color: var(--label);
+  text-align: center;
+  margin: -4px 0 10px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
 .toast {
   position: fixed;
   bottom: calc(16px + var(--safe-b));

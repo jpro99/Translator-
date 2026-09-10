@@ -77,6 +77,14 @@ export const STR = {
     en: 'Tap Add to Home Screen, then Add',
     it: 'Tocca Aggiungi a Home, poi Aggiungi',
   },
+  micSilent: {
+    en: 'Microphone is silent — check permission or close other apps using the mic.',
+    it: 'Microfono silenzioso — controlla i permessi o chiudi altre app che usano il microfono.',
+  },
+  heardSomething: {
+    en: 'Heard something…',
+    it: 'Rilevato audio…',
+  },
 };
 
 export function t(key, locale = 'en', ...args) {
