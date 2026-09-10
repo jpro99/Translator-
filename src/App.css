@@ -461,6 +461,50 @@ body {
 .lang-row-auto { margin: 0 8px 8px; border-radius: 12px; background: var(--bg); font-weight: 600; }
 .lang-native { margin-left: auto; font-size: 0.875rem; color: var(--label); }
 
+.offline-banner {
+  flex-shrink: 0;
+  padding: 8px 16px;
+  background: #fff3cd;
+  color: #664d03;
+  font-size: 0.8125rem;
+  text-align: center;
+  white-space: pre-line;
+  border-bottom: 1px solid rgba(102, 77, 3, 0.15);
+}
+
+.provider-chip {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 3px 8px;
+  border-radius: 8px;
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.retry-btn {
+  margin-top: 8px;
+  padding: 8px 14px;
+  border: none;
+  border-radius: 10px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+  color: var(--blue);
+  font: inherit;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.line-trans.is-failed,
+.chat-trans.is-failed {
+  color: var(--red);
+  font-weight: 500;
+}
+
 .toast {
   position: fixed;
   bottom: calc(var(--tab-h) + 12px + var(--safe-b));

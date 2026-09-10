@@ -1,94 +1,81 @@
 # Translator
 
-Real-time two-person conversation translator — a mobile-friendly PWA built with React and Vite.
+Real-time two-person conversation translator — a mobile-friendly PWA built with React and Vite. Built for travel: **works in Italy and the EU even when Google Translate is blocked or slow.**
 
 ## Open the app
 
 **Live:** [https://jpro99.github.io/Translator-/](https://jpro99.github.io/Translator-/)
 
-Use that project-pages URL (note the `/Translator-/` path). The root `https://jpro99.github.io/` is not this app — GitHub shows a 404 there.
+Use that URL (note `/Translator-/`). Root `https://jpro99.github.io/` is not this app.
 
-Works best in **Chrome or Edge** on desktop or Android. Allow microphone access for Talk/Listen.
+### On your phone in Italy
+
+1. Open **Chrome** (Android) or **Safari/Chrome** (iOS — speech works best in Chrome).
+2. Go to **https://jpro99.github.io/Translator-/**
+3. Optional: **Add to Home Screen** (install PWA) for offline UI + cached assets.
+4. Tap **Talk** → **Inizia conversazione** / **Start conversation**.
+5. Allow **microphone** when prompted.
+6. Person A speaks Italian, Person B speaks English (or any pair) — translations appear automatically.
+7. Small chip shows which provider worked (e.g. `via Lingva`) so you know it's not stuck.
+8. Toggle **🔊** to hear translations (uses Italian voice when available).
+
+If translation fails (bad network), the transcript still shows with a **Retry / Riprova** button. Retries queue automatically when you're back online.
 
 ## What it does
 
-- **Talk tab**: Two people speak any languages. Tap **Start conversation** — each utterance is auto-detected and translated for the other person. Languages are learned from the first clear phrases (optional overrides for Person A / Person B).
-- **Listen tab**: Overhear speech and see English translations (also auto-detects language by default).
+- **Talk tab**: Two people speak any languages. Auto-detect each utterance, translate both ways. Person A / Person B languages learned from speech (optional overrides).
+- **Listen tab**: Overhear speech → English translation with auto-detect.
 
-Speech uses the browser Web Speech API (Chrome/Edge) with a silent voice-activity detector to avoid Android beep loops. Translation uses free public endpoints (Google gtx, MyMemory, Lingva) — no API keys required.
+## Translation engine (EU-resilient)
+
+**No Google dependency.** Provider chain (auto-failover ~1.5s each):
+
+1. **MyMemory** (EU-based, reliable in Italy)
+2. **Lingva** (multiple EU instances)
+3. **LibreTranslate** (public instances)
+4. **DeepL** (if `VITE_DEEPL_API_KEY` set — recommended for Italy)
+5. **Azure Translator** (if `VITE_AZURE_TRANSLATOR_KEY` set)
+6. **Google gtx** (last resort only)
+
+Recent translations cached in **IndexedDB + localStorage** for flaky networks.
+
+### Optional API keys (better quality)
+
+Copy `.env.example` → `.env.local` for local dev:
+
+```bash
+VITE_DEEPL_API_KEY=your-deepl-free-key        # Best for Italian ↔ English
+VITE_AZURE_TRANSLATOR_KEY=your-azure-key
+VITE_AZURE_TRANSLATOR_REGION=westeurope
+```
+
+The app works **without keys** using free public providers.
 
 ## Requirements
 
-- **Browser**: Chrome or Edge (desktop or Android). Safari has limited SpeechRecognition support.
-- **Microphone**: Allow mic access when prompted.
+- **Browser**: Chrome or Edge (desktop or Android). Safari has limited SpeechRecognition.
+- **Microphone**: Allow when prompted. Error messages in English + Italian.
 - **Network**: Needed for translation (speech runs in-browser).
 
-## Quick start (local dev)
+## Local dev
 
 ```bash
 npm install
-npm run dev
+npm run dev          # http://localhost:5173
+npm run verify       # conversation + failover tests
+GITHUB_ACTIONS=true npm run build   # same as CI (base /Translator-/)
 ```
 
-Open the URL shown (usually `http://localhost:5173`) in Chrome.
+## Deploy
 
-### Happy-path manual test — two-person conversation
-
-1. Open the **Talk** tab.
-2. Tap **Start conversation** and allow the microphone.
-3. **Person A** says a phrase in one language (e.g. Spanish: *"Hola, ¿cómo estás?"*).
-   - You should see the original text and an English translation.
-   - Person A chip updates to show Spanish.
-4. **Person B** replies in another language (e.g. English: *"I'm fine, thanks."*).
-   - You should see the English original and a Spanish translation.
-   - Person B chip updates to show English.
-5. Continue alternating — each side should see/hear (if 🔊 is on) the other language.
-6. Tap **Stop conversation** when done.
-
-### Listen mode test
-
-1. Open the **Listen** tab → **Start listening**.
-2. Speak in any language (or type a sentence in the box and tap **Go**).
-3. Original + English translation should appear with auto-detected language label.
-
-### Automated sanity check
-
-```bash
-node scripts/verify-conversation.mjs
-```
-
-## What was broken (and fixed)
-
-| Issue | Fix |
-|-------|-----|
-| Talk mode was English ↔ one picked language only | Auto-detect per utterance; learn Person A / Person B languages |
-| Manual You/Them mic toggle required each turn | Continuous listen with smart recognition language switching |
-| Latin-script languages (Tagalog, Spanish) treated as English | Never skip translation based on `isEnglish()` alone; use Google `sl=auto` detection |
-| Language picker required before Listen | Default to auto-detect; picker is optional override |
-| Listen mode required picking language first | Start immediately with auto-detect |
-
-## Optional overrides
-
-- **Talk**: Tap Person A / Person B chips to lock a language before or during a conversation.
-- **Listen**: Tap the language chip to bias speech recognition toward one language.
-
-## Build & deploy
+Pushes to `main` deploy to GitHub Pages via `.github/workflows/deploy.yml` (~1–2 min).
 
 **Production URL:** https://jpro99.github.io/Translator-/
 
-Pushes to `main` run [.github/workflows/deploy.yml](.github/workflows/deploy.yml): `npm run build` with `base: /Translator-/`, upload `dist`, deploy via GitHub Pages. First deploy after enabling Pages can take 1–2 minutes.
-
-```bash
-npm run build          # local (base /)
-GITHUB_ACTIONS=true npm run build   # same as CI (base /Translator-/)
-npm run preview
-```
-
-Local dev uses `/`; GitHub Pages and CI use `/Translator-/`. Vercel uses `/` — see `vite.config.js`.
-
 ## Tech stack
 
-- React 18 + Vite 5
+- React 18 + Vite 5 + PWA (service worker, manifest, icons)
 - Web Speech API + VAD hybrid (`src/speech.js`)
-- Free translation APIs (`src/translate.js`)
+- Multi-provider translation (`src/translate.js`, `src/providers.js`)
 - Two-person state machine (`src/conversation.js`)
+- Bilingual UI (`src/i18n.js`) — English + Italian

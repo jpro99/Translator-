@@ -116,12 +116,30 @@ export default defineConfig({
             },
           },
           {
-            urlPattern: /^https:\/\/lingva\.ml\/.*/i,
+            urlPattern: /^https:\/\/(lingva\.ml|lingva\.[a-z0-9.-]+|translate\.plausibility\.cloud)\/.*/i,
             handler: 'NetworkFirst',
             options: {
               cacheName: 'lingva-cache',
               networkTimeoutSeconds: 4,
               expiration: { maxEntries: 300, maxAgeSeconds: 3600 },
+            },
+          },
+          {
+            urlPattern: /^https:\/\/(libretranslate\.com|translate\.argosopentech\.com)\/.*/i,
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'libre-cache',
+              networkTimeoutSeconds: 4,
+              expiration: { maxEntries: 300, maxAgeSeconds: 3600 },
+            },
+          },
+          {
+            urlPattern: /^https:\/\/api-free\.deepl\.com\/.*/i,
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'deepl-cache',
+              networkTimeoutSeconds: 4,
+              expiration: { maxEntries: 200, maxAgeSeconds: 3600 },
             },
           },
         ],

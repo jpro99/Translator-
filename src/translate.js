@@ -1,111 +1,146 @@
-const CACHE_KEY = 'tr_v2';
+import { cacheGet, cacheSet } from './cache';
+import { cleanTranslated, isUsefulTranslation } from './translateCore';
+import {
+  LINGVA_HOSTS,
+  LIBRE_HOSTS,
+  lingva,
+  myMemory,
+  libreTranslate,
+  deepL,
+  azureTranslator,
+  googleGtx,
+  runProvider,
+} from './providers';
 
-const _cacheInit = (() => {
-  try { return JSON.parse(localStorage.getItem(CACHE_KEY) || '[]'); } catch { return []; }
-})();
-const translationCache = new Map(_cacheInit);
+export { cleanTranslated } from './translateCore';
 
-try { localStorage.removeItem('tr_v1'); } catch {}
+const DEEPL_KEY = import.meta.env.VITE_DEEPL_API_KEY || '';
+const AZURE_KEY = import.meta.env.VITE_AZURE_TRANSLATOR_KEY || '';
+const AZURE_REGION = import.meta.env.VITE_AZURE_TRANSLATOR_REGION || 'westeurope';
 
-function persistCache() {
-  try {
-    localStorage.setItem(CACHE_KEY, JSON.stringify([...translationCache.entries()].slice(-900)));
-  } catch {}
+/** Build ordered provider list — EU-friendly first, Google last. */
+export function buildProviderChain(from, to) {
+  const chain = [];
+
+  // MyMemory (Italian company) — most reliable free tier from EU
+  chain.push({
+    id: 'MyMemory',
+    short: 'MyMemory',
+    run: (text) => myMemory(text, from, to),
+  });
+
+  for (const host of LINGVA_HOSTS) {
+    chain.push({
+      id: `Lingva (${host.split('.')[0]})`,
+      short: 'Lingva',
+      run: (text) => lingva(text, from, to, host),
+    });
+  }
+
+  for (const host of LIBRE_HOSTS) {
+    chain.push({
+      id: `LibreTranslate (${host.split('.')[0]})`,
+      short: 'LibreTranslate',
+      run: (text) => libreTranslate(text, from, to, host),
+    });
+  }
+
+  if (DEEPL_KEY) {
+    chain.push({
+      id: 'DeepL',
+      short: 'DeepL',
+      run: (text) => deepL(text, from, to, DEEPL_KEY),
+    });
+  }
+
+  if (AZURE_KEY) {
+    chain.push({
+      id: 'Azure',
+      short: 'Azure',
+      run: (text) => azureTranslator(text, from, to, AZURE_KEY, AZURE_REGION),
+    });
+  }
+
+  chain.push({
+    id: 'Google',
+    short: 'Google',
+    run: (text) => googleGtx(text, from, to),
+  });
+
+  return chain;
 }
 
-export function cleanTranslated(text) {
-  const t = (text || '').replace(/\s+/g, ' ').trim();
-  if (!t) return '';
-  return t.charAt(0).toUpperCase() + t.slice(1);
+/** Exported for tests — failover without network. */
+export async function translateWithChain(text, from, to, chain, { timeoutMs = 1500 } = {}) {
+  const raw = (text || '').trim();
+  if (!raw) return null;
+  if (from !== 'auto' && from === to) {
+    return { translation: cleanTranslated(raw), detectedLang: from, provider: 'local' };
+  }
+
+  let lastSame = null;
+  let lastDetected = null;
+  let lastProvider = null;
+
+  for (const provider of chain) {
+    try {
+      const { text: translated, detected } = await runProvider(
+        () => provider.run(raw),
+        timeoutMs,
+      );
+      if (detected) lastDetected = detected;
+      if (!translated) continue;
+      lastProvider = provider.short;
+      if (isUsefulTranslation(raw, translated)) {
+        return {
+          translation: translated,
+          detectedLang: lastDetected,
+          provider: provider.short,
+        };
+      }
+      lastSame = translated;
+    } catch {
+      // try next provider
+    }
+  }
+
+  if (lastSame) {
+    return { translation: lastSame, detectedLang: lastDetected, provider: lastProvider || 'fallback' };
+  }
+  return null;
 }
 
-async function translateViaGoogle(text, from, to) {
-  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(from)}&tl=${encodeURIComponent(to)}&dt=t&q=${encodeURIComponent(text)}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`gtx ${res.status}`);
-  const data = await res.json();
-  const joined = Array.isArray(data?.[0])
-    ? data[0].filter(Boolean).map((p) => p?.[0]).join('')
-    : '';
-  const detected = typeof data?.[2] === 'string' ? data[2] : null;
-  return { text: cleanTranslated(joined), detected };
-}
-
-async function translateViaMyMemory(text, from, to) {
-  const pairFrom = from === 'auto' ? 'Autodetect' : from;
-  const res = await fetch(
-    `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${pairFrom}|${to}`,
-  );
-  const data = await res.json();
-  if (data.responseStatus !== 200) throw new Error('mymemory');
-  const detected = data.responseData?.detectedSourceLanguage || null;
-  return { text: cleanTranslated(data.responseData?.translatedText), detected };
-}
-
-async function translateViaLingva(text, from, to) {
-  const sl = from === 'auto' ? 'auto' : from;
-  const res = await fetch(`https://lingva.ml/api/v1/${sl}/${to}/${encodeURIComponent(text)}`);
-  if (!res.ok) throw new Error(`lingva ${res.status}`);
-  const data = await res.json();
-  return { text: cleanTranslated(data.translation), detected: null };
-}
-
-/**
- * Translate with auto-detect first, then explicit lang. Returns translated text.
- */
 export async function translate(text, from, to) {
   const result = await translateWithDetection(text, from, to);
   return result?.translation ?? null;
 }
 
-/**
- * Translate and return detected source language (Google gtx index 2 when available).
- */
 export async function translateWithDetection(text, from, to) {
   const raw = (text || '').trim();
   if (!raw) return null;
   if (from !== 'auto' && from === to) {
-    return { translation: cleanTranslated(raw), detectedLang: from };
+    return { translation: cleanTranslated(raw), detectedLang: from, provider: 'local' };
   }
 
-  const key = `${raw}|${from}|${to}`;
-  const cached = translationCache.get(key);
-  if (cached) {
-    return typeof cached === 'string'
-      ? { translation: cached, detectedLang: from === 'auto' ? null : from }
-      : cached;
-  }
-
-  const save = (result) => {
-    if (!result?.translation) return null;
-    translationCache.set(key, result);
-    persistCache();
-    return result;
-  };
+  const cached = await cacheGet(raw, from, to);
+  if (cached?.translation) return cached;
 
   const attempts = [
-    () => translateViaGoogle(raw, 'auto', to),
-    () => translateViaGoogle(raw, from === 'auto' ? 'auto' : from, to),
-    () => translateViaMyMemory(raw, from === 'auto' ? 'Autodetect' : from, to),
-    () => translateViaLingva(raw, from === 'auto' ? 'auto' : from, to),
+    { from: 'auto', to },
+    ...(from !== 'auto' ? [{ from, to }] : []),
   ];
 
-  let lastSame = null;
-  let lastDetected = null;
-  for (const attempt of attempts) {
-    try {
-      const { text: translated, detected } = await attempt();
-      if (detected) lastDetected = detected;
-      if (!translated) continue;
-      if (translated.toLowerCase() !== raw.toLowerCase()) {
-        return save({ translation: translated, detectedLang: lastDetected });
-      }
-      lastSame = translated;
-    } catch {}
+  for (const { from: f, to: t } of attempts) {
+    const chain = buildProviderChain(f, t);
+    const result = await translateWithChain(raw, f, t, chain);
+    if (result?.translation) {
+      await cacheSet(raw, from, to, result);
+      return result;
+    }
   }
 
-  if (lastSame) {
-    return save({ translation: lastSame, detectedLang: lastDetected });
-  }
   return null;
 }
+
+/** Re-export chain builder pieces for verify script. */
+export { LINGVA_HOSTS, LIBRE_HOSTS } from './providers';

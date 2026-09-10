@@ -22,6 +22,8 @@ import {
   speakerLabel,
   findLanguage,
 } from './conversation';
+import { bilingual, t, uiLocale } from './i18n';
+import { enqueueRetry, onOnlineRetry, dequeueRetry } from './retryQueue';
 
 /* ─── Helpers ───────────────────────────────────────────────────────── */
 let _id = 0;
@@ -29,7 +31,7 @@ const nextId = () => ++_id;
 
 const norm = (t) => (t || '').trim().replace(/\s+/g, ' ').toLowerCase().replace(/[.,!?…]+$/g, '');
 
-const PINNED = ['ja', 'ko', 'fil', 'es', 'fr', 'de', 'zh'];
+const PINNED = ['it', 'es', 'fr', 'de', 'pt', 'ja', 'ko', 'fil', 'zh'];
 
 function formatTime(d = new Date()) {
   return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -64,6 +66,8 @@ export default function App() {
   const [converseStatus, setConverseStatus] = useState('');
   const [ttsOn, setTtsOn] = useState(false);
   const [micError, setMicError] = useState(null);
+  const [offline, setOffline] = useState(!navigator.onLine);
+  const locale = uiLocale();
 
   const converseActiveRef = useRef(false);
   const converseStateRef = useRef(createConversationState());
@@ -93,6 +97,47 @@ export default function App() {
     converseActiveRef.current = false;
     listenDetectRef.current = false;
     stopMic();
+  }, []);
+
+  useEffect(() => {
+    const onOff = () => setOffline(!navigator.onLine);
+    window.addEventListener('online', onOff);
+    window.addEventListener('offline', onOff);
+    const unsubRetry = onOnlineRetry(async (item) => {
+      const result = await translateWithDetection(item.text, item.from, item.to);
+      if (!result?.translation) return;
+      if (item.kind === 'chat') {
+        setMessages((prev) => prev.map((m) => (
+          m.id === item.id
+            ? {
+              ...m,
+              translation: result.translation,
+              failed: false,
+              provider: result.provider,
+              translating: false,
+            }
+            : m
+        )));
+      } else if (item.kind === 'listen') {
+        setListenLines((prev) => prev.map((line) => (
+          line.id === item.id
+            ? {
+              ...line,
+              translation: result.translation,
+              failed: false,
+              provider: result.provider,
+              translating: false,
+            }
+            : line
+        )));
+      }
+      dequeueRetry(item.id);
+    });
+    return () => {
+      window.removeEventListener('online', onOff);
+      window.removeEventListener('offline', onOff);
+      unsubRetry();
+    };
   }, []);
 
   const isRecentDupe = useCallback((text) => {
@@ -126,8 +171,41 @@ export default function App() {
     const u = new SpeechSynthesisUtterance(text);
     u.lang = langCode;
     u.rate = 0.92;
+    const prefix = (langCode || 'en').split('-')[0];
+    const voices = window.speechSynthesis.getVoices();
+    const voice = voices.find((v) => v.lang?.toLowerCase().startsWith(prefix));
+    if (voice) u.voice = voice;
     window.speechSynthesis.speak(u);
   }, []);
+
+  const retryChatMessage = useCallback(async (msg) => {
+    if (!msg?.said || !msg.targetLang) return;
+    setMessages((prev) => prev.map((m) => (
+      m.id === msg.id ? { ...m, translating: true, failed: false } : m
+    )));
+    const from = msg.sourceLang?.apiCode || 'auto';
+    const result = await translateWithDetection(msg.said, from, msg.targetLang.apiCode);
+    if (!result?.translation) {
+      setMessages((prev) => prev.map((m) => (
+        m.id === msg.id
+          ? { ...m, translating: false, failed: true, translation: bilingual('translateFailed') }
+          : m
+      )));
+      return;
+    }
+    setMessages((prev) => prev.map((m) => (
+      m.id === msg.id
+        ? {
+          ...m,
+          translation: result.translation,
+          provider: result.provider,
+          translating: false,
+          failed: false,
+        }
+        : m
+    )));
+    speak(result.translation, msg.targetLang.speechCode);
+  }, [speak]);
 
   /* ── Listen mode ── */
   const addListenLine = useCallback(async (text, lang) => {
@@ -140,17 +218,35 @@ export default function App() {
     const time = formatTime();
     setListenLines((prev) => [...prev, {
       id, text: cleaned, translation: null, translating: true, lang: lineLang, time,
+      provider: null, failed: false,
     }]);
     setListenInterim('');
-    let english = await translate(cleaned, 'auto', 'en');
-    if (!english) english = await translate(cleaned, lineLang.apiCode, 'en');
+    const result = await translateWithDetection(cleaned, 'auto', 'en')
+      || await translateWithDetection(cleaned, lineLang.apiCode, 'en');
+
+    if (!result?.translation) {
+      enqueueRetry({ id, kind: 'listen', text: cleaned, from: 'auto', to: 'en' });
+      setListenLines((prev) => prev.map((line) => (
+        line.id === id
+          ? {
+            ...line,
+            translation: bilingual('translateFailed'),
+            translating: false,
+            failed: true,
+          }
+          : line
+      )));
+      return;
+    }
 
     setListenLines((prev) => prev.map((line) => (
       line.id === id
         ? {
           ...line,
-          translation: english || '(couldn’t translate — try again)',
+          translation: result.translation,
+          provider: result.provider,
           translating: false,
+          failed: false,
         }
         : line
     )));
@@ -206,7 +302,8 @@ export default function App() {
         void addListenLine(cleaned, current);
       },
       onError: (msg) => {
-        setMicError(msg);
+        const mapped = /denied/i.test(msg) ? bilingual('micDenied') : bilingual('micRequired');
+        setMicError(mapped || msg);
         listenActiveRef.current = false;
         setListening(false);
         setListenStatus('');
@@ -233,7 +330,7 @@ export default function App() {
 
   const toggleListen = useCallback(async () => {
     if (!speechSupported()) {
-      setMicError('Microphone access is required. Allow it when prompted.');
+      setMicError(bilingual('speechUnsupported'));
       return;
     }
     if (listening || detecting) {
@@ -332,12 +429,21 @@ export default function App() {
     const { speaker, lang } = assignSpeaker(state, detectedCode, cleaned);
     const target = getOtherLanguage(state, speaker);
 
-    let translation = result?.translation;
     if (target.apiCode !== tentativeOther.apiCode) {
       const retry = await translateWithDetection(cleaned, detectedCode, target.apiCode);
-      translation = retry?.translation || translation;
+      if (retry?.translation) result = retry;
     }
-    const out = translation && !isGarbageTranscript(translation) ? translation : cleaned;
+
+    const failed = !result?.translation;
+    const out = failed
+      ? bilingual('translateFailed')
+      : (result.translation && !isGarbageTranscript(result.translation) ? result.translation : cleaned);
+
+    if (failed) {
+      enqueueRetry({
+        id, kind: 'chat', text: cleaned, from: detectedCode, to: target.apiCode,
+      });
+    }
 
     setMessages((prev) => prev.map((m) => (
       m.id === id
@@ -347,13 +453,15 @@ export default function App() {
           sourceLang: lang,
           targetLang: target,
           translation: out,
+          provider: result?.provider || null,
           translating: false,
+          failed,
         }
         : m
     )));
 
     syncPersonUi(state);
-    if (out && out !== cleaned) speak(out, target.speechCode);
+    if (!failed && out && out !== cleaned) speak(out, target.speechCode);
     if (converseActiveRef.current) restartMic();
   }, [remember, speak, isRecentDupe, syncPersonUi]);
 
@@ -389,7 +497,8 @@ export default function App() {
       },
       onFinal: handleConverseFinal,
       onError: (msg) => {
-        setMicError(msg);
+        const mapped = /denied/i.test(msg) ? bilingual('micDenied') : bilingual('micRequired');
+        setMicError(mapped || msg);
         converseActiveRef.current = false;
         setConversing(false);
         setConverseStatus('');
@@ -405,7 +514,7 @@ export default function App() {
 
   const toggleConverse = useCallback(async () => {
     if (!speechSupported()) {
-      setMicError('Microphone access is required. Allow it when prompted.');
+      setMicError(bilingual('speechUnsupported'));
       return;
     }
     if (conversing) {
@@ -468,6 +577,9 @@ export default function App() {
 
   return (
     <div className="app">
+      {offline && (
+        <div className="offline-banner">{bilingual('offline')}</div>
+      )}
       <main className="main">
         {tab === 'listen' && (
           <div className="panel">
@@ -518,9 +630,39 @@ export default function App() {
                   </div>
                   <p className="line-text">{line.text}</p>
                   <p className="line-arrow">↓ English</p>
-                  <p className={`line-trans ${line.translating ? 'is-pending' : ''}`}>
-                    {line.translating ? 'Translating…' : line.translation}
+                  <p className={`line-trans ${line.translating ? 'is-pending' : ''} ${line.failed ? 'is-failed' : ''}`}>
+                    {line.translating ? t('translating', locale) : line.translation}
                   </p>
+                  {line.provider && !line.translating && (
+                    <span className="provider-chip">{t('viaProvider', locale, line.provider)}</span>
+                  )}
+                  {line.failed && (
+                    <button
+                      type="button"
+                      className="retry-btn"
+                      onClick={() => {
+                        void (async () => {
+                          setListenLines((prev) => prev.map((l) => (
+                            l.id === line.id ? { ...l, translating: true, failed: false } : l
+                          )));
+                          const r = await translateWithDetection(line.text, 'auto', 'en');
+                          setListenLines((prev) => prev.map((l) => (
+                            l.id === line.id
+                              ? {
+                                ...l,
+                                translation: r?.translation || bilingual('translateFailed'),
+                                provider: r?.provider,
+                                translating: false,
+                                failed: !r?.translation,
+                              }
+                              : l
+                          )));
+                        })();
+                      }}
+                    >
+                      ↻ {locale === 'it' ? 'Riprova' : 'Retry'}
+                    </button>
+                  )}
                 </article>
               ))}
 
@@ -657,9 +799,21 @@ export default function App() {
                   <p className="chat-arrow">
                     ↓ {msg.targetLang ? `${msg.targetLang.flag} ${msg.targetLang.name}` : 'Translation'}
                   </p>
-                  <p className={`chat-trans chat-trans-lg ${msg.translating ? 'is-pending' : ''}`}>
-                    {msg.translating ? 'Translating…' : msg.translation}
+                  <p className={`chat-trans chat-trans-lg ${msg.translating ? 'is-pending' : ''} ${msg.failed ? 'is-failed' : ''}`}>
+                    {msg.translating ? t('translating', locale) : msg.translation}
                   </p>
+                  {msg.provider && !msg.translating && !msg.failed && (
+                    <span className="provider-chip">{t('viaProvider', locale, msg.provider)}</span>
+                  )}
+                  {msg.failed && (
+                    <button
+                      type="button"
+                      className="retry-btn"
+                      onClick={() => retryChatMessage(msg)}
+                    >
+                      ↻ {locale === 'it' ? 'Riprova' : 'Retry'}
+                    </button>
+                  )}
                 </article>
               ))}
 
@@ -697,7 +851,7 @@ export default function App() {
                 onClick={toggleConverse}
               >
                 <span className="listen-btn-dot" />
-                {conversing ? 'Stop conversation' : 'Start conversation'}
+                {conversing ? t('stopConverse', locale) : t('startConverse', locale)}
               </button>
             </div>
           </div>
