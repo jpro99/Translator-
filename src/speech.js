@@ -153,9 +153,13 @@ function resolveLang(getLang) {
   const v = typeof getLang === 'function' ? getLang() : getLang;
   if (!v) return { speechCode: 'en-US', apiCode: 'en' };
   if (typeof v === 'string') return { speechCode: v, apiCode: 'en' };
+  if (Array.isArray(v)) {
+    return { speechCode: v[0] || 'en-US', apiCode: 'auto', fallbackCodes: v.slice(1) };
+  }
   return {
     speechCode: v.speechCode || 'en-US',
     apiCode: v.apiCode || 'en',
+    fallbackCodes: v.fallbackCodes || [],
   };
 }
 
@@ -322,22 +326,30 @@ async function keepListeningHybrid({
       speechHold = 0;
       recognizing = true;
       onPhase?.('hearing');
-      const { speechCode } = resolveLang(getLang);
+      const { speechCode, fallbackCodes = [] } = resolveLang(getLang);
+      const langsToTry = [speechCode, ...fallbackCodes].filter(Boolean);
 
       // One beep here when recognition starts — then it runs until they pause.
-      await recognizeUtterance({
-        lang: speechCode,
+      let accepted = false;
+      for (const lang of langsToTry) {
+        if (!activeRef.current || myGen !== gen || accepted) break;
+        await recognizeUtterance({
+          lang,
         onInterim: (t) => {
           if (activeRef.current && myGen === gen) onInterim?.(t);
         },
         onFinal: async (text) => {
           if (!activeRef.current || myGen !== gen) return;
+          if (isGarbageTranscript(text)) return;
+          accepted = true;
           onPhase?.('transcribing');
           await onFinal?.(text);
           if (activeRef.current && myGen === gen) onPhase?.('hearing');
         },
         myGen,
-      });
+        });
+        if (accepted) break;
+      }
 
       recognizing = false;
       onInterim?.('');

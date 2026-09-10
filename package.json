@@ -6,7 +6,8 @@
     "dev": "vite --host",
     "fetch-whisper": "node scripts/fetch-whisper-model.js",
     "build": "node scripts/create-icons.js && vite build && node scripts/pages-fallback.js",
-    "preview": "vite preview --host"
+    "preview": "vite preview --host",
+    "verify": "node scripts/verify-conversation.mjs"
   },
   "dependencies": {
     "@huggingface/transformers": "3.8.1",
