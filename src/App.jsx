@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import TableMode from './TableMode';
 import EarbudMode from './EarbudMode';
 import ExpertListenerMode from './ExpertListenerMode';
+import InstallPrompt from './InstallPrompt';
 import { bilingual, uiLocale } from './i18n';
 import { onOnlineRetry, dequeueRetry } from './retryQueue';
 import { translateWithDetection } from './translate';
@@ -48,6 +49,8 @@ export default function App() {
               : 'Auto-detect · No Google required · Works in Italy'}
           </p>
         </header>
+
+        <InstallPrompt />
 
         <div className="mode-cards">
           <button type="button" className="mode-card mode-card-primary" onClick={() => setMode('table')}>

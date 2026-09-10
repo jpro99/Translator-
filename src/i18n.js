@@ -49,6 +49,34 @@ export const STR = {
     en: 'Stop',
     it: 'Ferma',
   },
+  installed: {
+    en: 'Installed ✓',
+    it: 'Installata ✓',
+  },
+  installTitle: {
+    en: 'Install on your phone',
+    it: 'Installa sul telefono',
+  },
+  installSubtitle: {
+    en: 'Works offline · opens full screen',
+    it: 'Funziona offline · schermo intero',
+  },
+  installButton: {
+    en: 'Install app',
+    it: 'Installa app',
+  },
+  iosInstallTitle: {
+    en: 'Add to Home Screen',
+    it: 'Aggiungi a Home',
+  },
+  iosStep1: {
+    en: 'Tap Share in the Safari toolbar',
+    it: 'Tocca Condividi nella barra Safari',
+  },
+  iosStep2: {
+    en: 'Tap Add to Home Screen, then Add',
+    it: 'Tocca Aggiungi a Home, poi Aggiungi',
+  },
 };
 
 export function t(key, locale = 'en', ...args) {

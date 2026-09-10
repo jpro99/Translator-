@@ -516,7 +516,143 @@ body {
   padding-top: max(32px, env(safe-area-inset-top));
 }
 
-.home-hero { margin-bottom: 32px; }
+.home-hero { margin-bottom: 20px; }
+
+/* ─── Install prompt ────────────────────────────────────────────────── */
+.install-banner {
+  margin-bottom: 20px;
+  border-radius: 16px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.install-banner-done {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.install-banner-cta {
+  padding: 16px;
+  border: 2px solid var(--blue);
+  background: linear-gradient(145deg, rgba(0, 122, 255, 0.06) 0%, var(--card) 100%);
+}
+
+.install-cta-text {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.install-cta-text strong {
+  display: block;
+  font-size: 1.0625rem;
+  margin-bottom: 2px;
+}
+
+.install-cta-text p {
+  font-size: 0.875rem;
+  color: var(--label);
+  margin: 0;
+  line-height: 1.35;
+}
+
+.install-icon {
+  font-size: 1.5rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.install-btn {
+  display: block;
+  width: 100%;
+  padding: 14px 20px;
+  border: none;
+  border-radius: 12px;
+  background: var(--blue);
+  color: #fff;
+  font: inherit;
+  font-size: 1.0625rem;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 122, 255, 0.35);
+}
+
+.install-btn:active { transform: scale(0.98); }
+
+.install-banner-ios {
+  padding: 14px 16px 16px;
+  border: 1px solid var(--sep);
+}
+
+.install-ios-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.install-ios-header strong {
+  flex: 1;
+  font-size: 1rem;
+}
+
+.install-dismiss {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 16px;
+  background: var(--bg);
+  color: var(--label);
+  font-size: 1.25rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.install-ios-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.install-ios-steps li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.9375rem;
+  line-height: 1.35;
+}
+
+.step-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-size: 1.125rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.install-ios-en {
+  margin-top: 10px;
+  font-size: 0.75rem;
+  color: var(--label);
+  line-height: 1.35;
+}
 
 .home-brand {
   font-size: 0.875rem;
