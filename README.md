@@ -2,6 +2,14 @@
 
 Real-time two-person conversation translator — a mobile-friendly PWA built with React and Vite.
 
+## Open the app
+
+**Live:** [https://jpro99.github.io/Translator-/](https://jpro99.github.io/Translator-/)
+
+Use that project-pages URL (note the `/Translator-/` path). The root `https://jpro99.github.io/` is not this app — GitHub shows a 404 there.
+
+Works best in **Chrome or Edge** on desktop or Android. Allow microphone access for Talk/Listen.
+
 ## What it does
 
 - **Talk tab**: Two people speak any languages. Tap **Start conversation** — each utterance is auto-detected and translated for the other person. Languages are learned from the first clear phrases (optional overrides for Person A / Person B).
@@ -66,12 +74,17 @@ node scripts/verify-conversation.mjs
 
 ## Build & deploy
 
+**Production URL:** https://jpro99.github.io/Translator-/
+
+Pushes to `main` run [.github/workflows/deploy.yml](.github/workflows/deploy.yml): `npm run build` with `base: /Translator-/`, upload `dist`, deploy via GitHub Pages. First deploy after enabling Pages can take 1–2 minutes.
+
 ```bash
-npm run build
+npm run build          # local (base /)
+GITHUB_ACTIONS=true npm run build   # same as CI (base /Translator-/)
 npm run preview
 ```
 
-Deploys via GitHub Pages (`/Translator-/`) or Vercel — see `vite.config.js` and `.github/workflows/deploy.yml`.
+Local dev uses `/`; GitHub Pages and CI use `/Translator-/`. Vercel uses `/` — see `vite.config.js`.
 
 ## Tech stack
 

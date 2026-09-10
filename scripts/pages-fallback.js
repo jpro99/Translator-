@@ -12,4 +12,5 @@ if (!fs.existsSync(index)) {
 }
 
 fs.copyFileSync(index, fallback);
-console.log('pages-fallback: wrote dist/404.html');
+fs.writeFileSync(path.join(dist, '.nojekyll'), '');
+console.log('pages-fallback: wrote dist/404.html and dist/.nojekyll');
