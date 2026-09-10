@@ -81,12 +81,18 @@ export async function loadWhisper(onProgress) {
   }
 }
 
+function normalizeWhisperLang(language) {
+  if (!language || language === 'auto') return null;
+  const c = language.split('-')[0].toLowerCase();
+  if (c === 'fil') return 'tl';
+  return c;
+}
+
 export async function transcribeAudio(float32_16k, { language } = {}) {
   if (!transcriber) throw new Error('Whisper not loaded');
   const opts = { task: 'transcribe', return_timestamps: false };
-  if (language && language !== 'auto') {
-    opts.language = language.split('-')[0];
-  }
+  const lang = normalizeWhisperLang(language);
+  if (lang) opts.language = lang;
   const result = await withTimeout(
     transcriber(float32_16k, opts),
     TRANSCRIBE_TIMEOUT_MS,

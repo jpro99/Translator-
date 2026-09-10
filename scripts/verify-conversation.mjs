@@ -3,6 +3,8 @@
  * Run: npm run verify
  */
 
+import { isTagalog, detectLanguageFromText, providerLangVariants, whisperLangCode, TAGALOG } from '../src/languages.js';
+
 // ── Conversation state (inline) ─────────────────────────────────────
 const ENGLISH = { key: 'en', apiCode: 'en', speechCode: 'en-US', name: 'English' };
 
@@ -78,12 +80,19 @@ const failover = await translateWithChain('Ciao', 'it', 'en', buildMockChain());
 assert(failover?.provider === 'LibreTranslate', 'failover skips dead providers');
 assert(failover?.translation === 'TR:Ciao', 'failover returns translation from 3rd provider');
 
+// Table mode UX constants
+assert(typeof 'rotate-180' === 'string', 'table mode uses 180deg flip class');
+assert(order.indexOf('Google') > order.indexOf('MyMemory'), 'Google is after MyMemory');
+
+assert(isTagalog('Kumusta, mahal ko'), 'Tagalog heuristic detects Filipino');
+assert(detectLanguageFromText('Salamat po sa inyo')?.apiCode === 'tl', 'auto-detect recognizes Tagalog');
+assert(providerLangVariants('tl').includes('fil'), 'provider tries fil alias for tl');
+assert(whisperLangCode('fil') === 'tl', 'Whisper maps fil to tl');
+assert(TAGALOG.speechCode === 'fil-PH', 'Tagalog speech code is fil-PH');
+
 if (failed) {
   console.error(`\n${failed} check(s) failed`);
   process.exit(1);
 }
-// Table mode UX constants
-assert(typeof 'rotate-180' === 'string', 'table mode uses 180deg flip class');
-assert(order.indexOf('Google') > order.indexOf('MyMemory'), 'Google is after MyMemory');
 
 console.log('\nAll checks passed.');

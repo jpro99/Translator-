@@ -1,5 +1,6 @@
 import { cacheGet, cacheSet } from './cache';
 import { cleanTranslated, isUsefulTranslation } from './translateCore';
+import { providerLangVariants } from './languages';
 import {
   LINGVA_HOSTS,
   LIBRE_HOSTS,
@@ -125,10 +126,16 @@ export async function translateWithDetection(text, from, to) {
   const cached = await cacheGet(raw, from, to);
   if (cached?.translation) return cached;
 
-  const attempts = [
-    { from: 'auto', to },
-    ...(from !== 'auto' ? [{ from, to }] : []),
-  ];
+  const attempts = [{ from: 'auto', to }];
+  if (from !== 'auto') {
+    const fromCodes = [...new Set(providerLangVariants(from))];
+    const toCodes = [...new Set(providerLangVariants(to))];
+    for (const f of fromCodes) {
+      for (const t of toCodes) {
+        attempts.push({ from: f, to: t });
+      }
+    }
+  }
 
   for (const { from: f, to: t } of attempts) {
     const chain = buildProviderChain(f, t);

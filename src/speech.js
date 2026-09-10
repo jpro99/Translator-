@@ -3,6 +3,7 @@
  * VAD + MediaRecorder recording for Whisper path.
  */
 import { resampleTo16k, whisperSupported } from './audioUtils';
+import { whisperLangCode } from './languages';
 
 let gen = 0;
 let media = null;
@@ -127,9 +128,9 @@ function resolveLang(getLang) {
   }
   return {
     speechCode: v.speechCode || 'en-US',
-    apiCode: v.apiCode || 'en',
+    apiCode: v.apiCode || v.whisperLang || 'auto',
     fallbackCodes: v.fallbackCodes || [],
-    whisperLang: v.whisperLang || null,
+    whisperLang: v.whisperLang ?? null,
   };
 }
 
@@ -296,10 +297,15 @@ function recognizeUtterance({ lang, onInterim, onFinal, myGen, continuous = true
   });
 }
 
-async function runWebSpeechBurst({ getLang, onInterim, onFinal, onPhase, myGen }) {
+function webSpeechLangs(getLang) {
   const { speechCode, fallbackCodes = [] } = resolveLang(getLang);
-  const langs = [speechCode, ...fallbackCodes, 'it-IT', 'en-US'].filter(Boolean);
-  const unique = [...new Set(langs)];
+  return [...new Set(
+    [speechCode, ...fallbackCodes, 'fil-PH', 'tl-PH', 'it-IT', 'en-US'].filter(Boolean),
+  )];
+}
+
+async function runWebSpeechBurst({ getLang, onInterim, onFinal, onPhase, myGen }) {
+  const unique = webSpeechLangs(getLang);
 
   onPhase?.('webspeech');
   let accepted = false;
@@ -433,8 +439,11 @@ async function vadLoop({
 
         if (pcm.length >= MIN_PCM_SAMPLES && transcribeAudioFn) {
           try {
-            const { whisperLang } = resolveLang(getLang);
-            const text = await transcribeAudioFn(pcm, { language: whisperLang || 'auto' });
+            const { whisperLang, apiCode } = resolveLang(getLang);
+            const text = await transcribeAudioFn(
+              pcm,
+              { language: whisperLang || whisperLangCode(apiCode) || 'auto' },
+            );
             if (text && !isGarbageTranscript(text) && activeRef.current && myGen === gen) {
               gotText = true;
               whisperMisses = 0;
@@ -473,6 +482,77 @@ async function vadLoop({
     await sleep(POLL_MS);
   }
 
+  stopRecognition();
+  onInterim?.('');
+}
+
+/** Always-on Web Speech for Expert Listener — avoids VAD-missed utterances on Android. */
+async function expertWebSpeechLoop({
+  activeRef, getLang, onInterim, onFinal, onPhase, onLevel, onStatus, myGen,
+}) {
+  const levelBuf = new Uint8Array(media.analyser.fftSize);
+  const SILENT_LEVEL = 0.0015;
+  const SILENT_WARN_MS = 8000;
+  const SPEECH_LEVEL = 0.005;
+  let silentSince = Date.now();
+  let hadAnyLevel = false;
+  let polling = true;
+
+  onPhase?.('hearing');
+  onStatus?.('mic ok · webspeech continuous');
+
+  const pollLevels = async () => {
+    while (polling && activeRef.current && myGen === gen) {
+      const level = voiceLevel(media.analyser, levelBuf);
+      onLevel?.(level);
+      if (level > SILENT_LEVEL) {
+        hadAnyLevel = true;
+        silentSince = Date.now();
+        if (level >= SPEECH_LEVEL) onStatus?.('vad speech · listening');
+      } else if (!hadAnyLevel && Date.now() - silentSince > SILENT_WARN_MS) {
+        onStatus?.('mic silent — check permission');
+      }
+      await sleep(80);
+    }
+  };
+
+  void pollLevels();
+
+  while (activeRef.current && myGen === gen) {
+    if (forceEndCapture) {
+      forceEndCapture = false;
+      stopRecognition();
+      await sleep(200);
+      continue;
+    }
+
+    const langs = webSpeechLangs(getLang);
+    let accepted = false;
+    for (const lang of langs) {
+      if (accepted || myGen !== gen || !activeRef.current) break;
+      onStatus?.(`webspeech · ${lang}`);
+      await recognizeUtterance({
+        lang,
+        onInterim: (txt) => {
+          if (txt) onInterim?.(txt);
+        },
+        onFinal: async (text) => {
+          if (!text || isGarbageTranscript(text) || myGen !== gen || !activeRef.current) return;
+          accepted = true;
+          onStatus?.('recognized · translating');
+          onPhase?.('transcribing');
+          await onFinal?.(text);
+          onPhase?.('hearing');
+          onStatus?.('webspeech listening');
+        },
+        myGen,
+      });
+      if (accepted) break;
+    }
+    await sleep(150);
+  }
+
+  polling = false;
   stopRecognition();
   onInterim?.('');
 }
@@ -548,11 +628,19 @@ export async function keepListening({
     return;
   }
 
+  const useExpertContinuous = profile === 'expert' && !useWhisperRef.current;
+
   try {
-    await vadLoop({
-      activeRef, getLang, onInterim, onFinal, onPhase, onLevel, onStatus, myGen,
-      useWhisperRef, transcribeAudioFn: transcribeAudio, outdoor,
-    });
+    if (useExpertContinuous) {
+      await expertWebSpeechLoop({
+        activeRef, getLang, onInterim, onFinal, onPhase, onLevel, onStatus, myGen,
+      });
+    } else {
+      await vadLoop({
+        activeRef, getLang, onInterim, onFinal, onPhase, onLevel, onStatus, myGen,
+        useWhisperRef, transcribeAudioFn: transcribeAudio, outdoor,
+      });
+    }
   } finally {
     if (myGen === gen) {
       stopRecognition();

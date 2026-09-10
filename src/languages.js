@@ -10,6 +10,16 @@ const HAS_CYRILLIC           = t => /[Ѐ-ӿ]/.test(t);
 const HAS_GREEK              = t => /[Ͱ-Ͽ]/.test(t);
 const LATIN_MIN2             = t => /[a-zA-Z]{2,}/.test(t) && t.trim().length >= 2;
 
+// Common Filipino / Tagalog function words and greetings
+const TAGALOG_HINTS = /\b(ang|ng|mga|sa|ay|ako|ikaw|siya|kami|kayo|sila|kumusta|salamat|mahal|oo|hindi|po|ho|ba|nga|din|rin|lang|naman|dito|doon|ito|iyan|iyon|para|pero|kasi|talaga|magandang|umaga|gabi|araw|paki|sige|gusto|wala|mayroon|nandito|nandiyan)\b/i;
+
+export function isTagalog(text) {
+  if (!text?.trim() || !LATIN_MIN2(text)) return false;
+  if (TAGALOG_HINTS.test(text)) return true;
+  const markers = (text.match(/\b(ang|ng|mga|sa|ay)\b/gi) || []).length;
+  return markers >= 2;
+}
+
 // Generic Android offline speech download instructions
 const OFFLINE_STEPS = (lang) => [
   'Open  Android Settings  on your phone',
@@ -31,7 +41,7 @@ export const LANGUAGES = {
   vi:  { key:'vi',  name:'Vietnamese', native:'Tiếng Việt',    flag:'🇻🇳', region:'Southeast Asia',  speechCode:'vi-VN', apiCode:'vi', isMine: LATIN_MIN2 },
   id:  { key:'id',  name:'Indonesian', native:'Bahasa Indonesia',flag:'🇮🇩', region:'Southeast Asia', speechCode:'id-ID', apiCode:'id', isMine: LATIN_MIN2 },
   ms:  { key:'ms',  name:'Malay',      native:'Bahasa Melayu', flag:'🇲🇾', region:'Southeast Asia',  speechCode:'ms-MY', apiCode:'ms', isMine: LATIN_MIN2 },
-  fil: { key:'fil', name:'Tagalog',    native:'Tagalog',       flag:'🇵🇭', region:'Southeast Asia',  speechCode:'fil-PH',apiCode:'tl', isMine: LATIN_MIN2 },
+  fil: { key:'fil', name:'Tagalog',    native:'Tagalog',       flag:'🇵🇭', region:'Southeast Asia',  speechCode:'fil-PH',apiCode:'tl', isMine: isTagalog },
 
   // ── Middle East ───────────────────────────────────────────────────────
   ar:  { key:'ar',  name:'Arabic',     native:'العربية',        flag:'🇸🇦', region:'Middle East',     speechCode:'ar-SA', apiCode:'ar', isMine: HAS_ARABIC },
@@ -101,11 +111,47 @@ export const ENGLISH = {
   speechCode: 'en-US', apiCode: 'en', isMine: isEnglish,
 };
 
+export const TAGALOG = LANGUAGES.fil;
+
+/** Speech recognition codes for Tagalog (device variance). */
+export const TAGALOG_SPEECH_CODES = ['fil-PH', 'tl-PH', 'fil'];
+
+/** Tour / family language fallbacks for listen modes. */
+export const TOUR_SPEECH_CODES = [
+  'fil-PH', 'tl-PH', 'it-IT', 'en-US', 'es-ES', 'fr-FR', 'de-DE', 'pt-BR',
+];
+
+/** Provider APIs vary between tl and fil — try both. */
+export function providerLangVariants(apiCode) {
+  if (!apiCode || apiCode === 'auto') return ['auto'];
+  const c = apiCode.toLowerCase();
+  if (c === 'tl' || c === 'fil') return ['tl', 'fil'];
+  return [c];
+}
+
+/** Whisper uses ISO 639-1 `tl` for Tagalog/Filipino. */
+export function whisperLangCode(apiCode) {
+  if (!apiCode || apiCode === 'auto') return 'auto';
+  const c = apiCode.split('-')[0].toLowerCase();
+  if (c === 'fil') return 'tl';
+  return c;
+}
+
+export function findLanguageByKey(keyOrCode) {
+  if (!keyOrCode) return null;
+  const c = keyOrCode.toLowerCase();
+  if (c === 'en') return ENGLISH;
+  if (c === 'tl' || c === 'fil') return TAGALOG;
+  return LANGUAGE_LIST.find((l) => l.key === c || l.apiCode === c) || null;
+}
+
 /** Guess language from transcript text (for labeling listen-mode lines). */
 export function detectLanguageFromText(text) {
   if (!text?.trim()) return null;
+  if (isTagalog(text)) return TAGALOG;
   if (isEnglish(text)) return ENGLISH;
   for (const lang of LANGUAGE_LIST) {
+    if (lang.key === 'fil') continue;
     if (!lang.isMine(text)) continue;
     if (lang.key === 'ja' && !/[ぁ-ん]/.test(text) && !/[一-鿿]/.test(text)) continue;
     return lang;

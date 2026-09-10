@@ -1,4 +1,5 @@
 import { cleanTranslated } from './translateCore';
+import { providerLangVariants } from './languages';
 
 const PROVIDER_TIMEOUT_MS = 1500;
 
@@ -27,6 +28,13 @@ function sl(from) {
   return from === 'auto' ? 'auto' : from;
 }
 
+function providerCode(code) {
+  if (!code || code === 'auto') return code;
+  const c = code.toLowerCase();
+  if (c === 'fil') return 'tl';
+  return c;
+}
+
 async function withTimeout(promise, ms = PROVIDER_TIMEOUT_MS) {
   let timer;
   try {
@@ -48,24 +56,47 @@ function ok(text, detected = null) {
 }
 
 export async function lingva(text, from, to, host) {
-  const res = await fetch(
-    `https://${host}/api/v1/${sl(from)}/${to}/${encodeURIComponent(text)}`,
-    { signal: fetchSignal() },
-  );
-  if (!res.ok) throw new Error(`lingva ${res.status}`);
-  const data = await res.json();
-  return ok(data.translation);
+  const froms = from === 'auto' ? ['auto'] : providerLangVariants(from);
+  const tos = providerLangVariants(to);
+  let lastErr;
+  for (const f of froms) {
+    for (const t of tos) {
+      try {
+        const res = await fetch(
+          `https://${host}/api/v1/${sl(providerCode(f))}/${providerCode(t)}/${encodeURIComponent(text)}`,
+          { signal: fetchSignal() },
+        );
+        if (!res.ok) throw new Error(`lingva ${res.status}`);
+        const data = await res.json();
+        return ok(data.translation);
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+  }
+  throw lastErr || new Error('lingva');
 }
 
 export async function myMemory(text, from, to) {
-  const pairFrom = from === 'auto' ? 'Autodetect' : from;
-  const res = await fetch(
-    `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${pairFrom}|${to}`,
-    { signal: fetchSignal() },
-  );
-  const data = await res.json();
-  if (data.responseStatus !== 200) throw new Error('mymemory');
-  return ok(data.responseData?.translatedText, data.responseData?.detectedSourceLanguage);
+  const froms = from === 'auto' ? ['Autodetect'] : providerLangVariants(from).map(providerCode);
+  const tos = providerLangVariants(to).map(providerCode);
+  let lastErr;
+  for (const pairFrom of froms) {
+    for (const pairTo of tos) {
+      try {
+        const res = await fetch(
+          `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${pairFrom}|${pairTo}`,
+          { signal: fetchSignal() },
+        );
+        const data = await res.json();
+        if (data.responseStatus !== 200) throw new Error('mymemory');
+        return ok(data.responseData?.translatedText, data.responseData?.detectedSourceLanguage);
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+  }
+  throw lastErr || new Error('mymemory');
 }
 
 export async function libreTranslate(text, from, to, host) {

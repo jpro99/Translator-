@@ -8,7 +8,14 @@ import {
   cleanTranscript,
 } from './speech';
 import { translateWithDetection } from './translate';
-import { detectLanguageFromText, ENGLISH, LANGUAGE_LIST } from './languages';
+import {
+  detectLanguageFromText,
+  ENGLISH,
+  LANGUAGE_LIST,
+  TOUR_SPEECH_CODES,
+  whisperLangCode,
+  findLanguageByKey,
+} from './languages';
 import { speakAloud } from './audio';
 import { bilingual, t, uiLocale } from './i18n';
 import { enqueueRetry, dequeueRetry } from './retryQueue';
@@ -20,8 +27,29 @@ function formatTime(d = new Date()) {
   return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
-const PINNED = ['it', 'en', 'es', 'fr', 'de', 'pt'];
+const PINNED = ['fil', 'it', 'en', 'es', 'fr', 'de', 'pt'];
 const SOURCE_HINT_KEY = 'expert_source_hint_v1';
+
+function loadSavedSourceHint() {
+  try {
+    const raw = localStorage.getItem(SOURCE_HINT_KEY);
+    if (!raw) return null;
+    const saved = JSON.parse(raw);
+    return findLanguageByKey(saved?.key || saved?.apiCode);
+  } catch {
+    return null;
+  }
+}
+
+function persistSourceHint(lang) {
+  try {
+    if (lang) {
+      localStorage.setItem(SOURCE_HINT_KEY, JSON.stringify({ key: lang.key, apiCode: lang.apiCode }));
+    } else {
+      localStorage.removeItem(SOURCE_HINT_KEY);
+    }
+  } catch {}
+}
 
 export default function ExpertListenerMode({ onBack }) {
   const locale = uiLocale();
@@ -49,10 +77,11 @@ export default function ExpertListenerMode({ onBack }) {
   const silentWarnedRef = useRef(false);
 
   useEffect(() => {
-    // Never sticky-wrong guide language from old sessions
-    try { localStorage.removeItem(SOURCE_HINT_KEY); } catch {}
-    setSourceHint(null);
-    sourceRef.current = null;
+    const saved = loadSavedSourceHint();
+    if (saved) {
+      setSourceHint(saved);
+      sourceRef.current = saved;
+    }
   }, []);
 
   useEffect(() => { targetRef.current = targetLang; }, [targetLang]);
@@ -103,8 +132,17 @@ export default function ExpertListenerMode({ onBack }) {
     setInterim('');
     setDebugStatus('translate…');
 
-    const result = await translateWithDetection(cleaned, 'auto', targetRef.current.apiCode)
-      || await translateWithDetection(cleaned, sourceLang?.apiCode || 'auto', targetRef.current.apiCode);
+    const hinted = sourceRef.current?.apiCode;
+    let result = null;
+    if (hinted && hinted !== 'auto') {
+      result = await translateWithDetection(cleaned, hinted, targetRef.current.apiCode);
+    }
+    if (!result?.translation) {
+      result = await translateWithDetection(cleaned, 'auto', targetRef.current.apiCode);
+    }
+    if (!result?.translation && sourceLang?.apiCode && sourceLang.apiCode !== hinted) {
+      result = await translateWithDetection(cleaned, sourceLang.apiCode, targetRef.current.apiCode);
+    }
 
     if (!result?.translation) {
       enqueueRetry({
@@ -205,17 +243,19 @@ export default function ExpertListenerMode({ onBack }) {
       outdoor: true,
       profile: 'expert',
       getLang: () => {
+        const tourFallbacks = TOUR_SPEECH_CODES;
         if (sourceRef.current) {
+          const hint = sourceRef.current;
           return {
-            speechCode: sourceRef.current.speechCode,
-            fallbackCodes: ['it-IT', 'en-US', 'es-ES', 'fr-FR', 'de-DE'],
-            whisperLang: 'auto',
+            speechCode: hint.speechCode,
+            fallbackCodes: tourFallbacks.filter((c) => c !== hint.speechCode),
+            whisperLang: whisperLangCode(hint.apiCode),
+            apiCode: hint.apiCode,
           };
         }
-        // Auto-detect: try common tour languages
         return {
-          speechCode: 'it-IT',
-          fallbackCodes: ['en-US', 'es-ES', 'fr-FR', 'de-DE', 'pt-BR'],
+          speechCode: 'fil-PH',
+          fallbackCodes: tourFallbacks.filter((c) => c !== 'fil-PH'),
           whisperLang: 'auto',
         };
       },
@@ -435,7 +475,7 @@ export default function ExpertListenerMode({ onBack }) {
                 onClick={() => {
                   setSourceHint(null);
                   sourceRef.current = null;
-                  try { localStorage.removeItem(SOURCE_HINT_KEY); } catch {}
+                  persistSourceHint(null);
                   setShowLangPicker(null);
                   setLangSearch('');
                 }}
@@ -464,6 +504,7 @@ export default function ExpertListenerMode({ onBack }) {
                       } else {
                         setSourceHint(lang);
                         sourceRef.current = lang;
+                        persistSourceHint(lang);
                       }
                       setShowLangPicker(null);
                       setLangSearch('');
@@ -490,6 +531,7 @@ export default function ExpertListenerMode({ onBack }) {
                     } else {
                       setSourceHint(lang);
                       sourceRef.current = lang;
+                      persistSourceHint(lang);
                     }
                     setShowLangPicker(null);
                     setLangSearch('');

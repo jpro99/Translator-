@@ -1,4 +1,4 @@
-import { ENGLISH, LANGUAGE_LIST, detectLanguageFromText } from './languages';
+import { ENGLISH, LANGUAGE_LIST, TAGALOG, LANGUAGES, detectLanguageFromText } from './languages';
 
 /** Normalize Google / MyMemory API codes to our apiCode keys. */
 export function normalizeApiCode(code) {
@@ -94,6 +94,8 @@ export function getRecognitionSpeechCodes(state) {
   };
 
   if (!state.personA && !state.personB) {
+    push(TAGALOG);
+    push(LANGUAGES.it);
     push(ENGLISH);
     return codes;
   }
