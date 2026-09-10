@@ -15,9 +15,9 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['icon-192.png', 'icon-512.png'],
       manifest: {
-        name: 'Language Translator',
+        name: 'Translator — Table Mode',
         short_name: 'Translator',
-        description: 'Real-time conversation translator',
+        description: 'Two-person translator — Table Mode & Earbuds. On-device speech, works in Italy.',
         theme_color: '#f2f2f7',
         background_color: '#f2f2f7',
         display: 'standalone',

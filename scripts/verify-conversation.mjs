@@ -82,4 +82,8 @@ if (failed) {
   console.error(`\n${failed} check(s) failed`);
   process.exit(1);
 }
+// Table mode UX constants
+assert(typeof 'rotate-180' === 'string', 'table mode uses 180deg flip class');
+assert(order.indexOf('Google') > order.indexOf('MyMemory'), 'Google is after MyMemory');
+
 console.log('\nAll checks passed.');

@@ -505,9 +505,301 @@ body {
   font-weight: 500;
 }
 
+/* ─── Home ──────────────────────────────────────────────────────────── */
+.home-app { max-width: 480px; }
+
+.home-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 24px 20px;
+  padding-top: max(32px, env(safe-area-inset-top));
+}
+
+.home-hero { margin-bottom: 32px; }
+
+.home-brand {
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--blue);
+  margin-bottom: 8px;
+}
+
+.home-headline {
+  font-size: 2.75rem;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  line-height: 1.05;
+}
+
+.home-tagline {
+  margin-top: 10px;
+  font-size: 1.0625rem;
+  color: var(--label);
+  line-height: 1.4;
+}
+
+.mode-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.mode-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 22px 20px;
+  border: none;
+  border-radius: 20px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.12s;
+}
+
+.mode-card:active { transform: scale(0.98); }
+
+.mode-card-primary {
+  background: linear-gradient(145deg, #007aff 0%, #0056cc 100%);
+  color: #fff;
+}
+
+.mode-card-primary .mode-card-desc { color: rgba(255, 255, 255, 0.82); }
+
+.mode-card-icon { font-size: 2rem; line-height: 1; }
+
+.mode-card-name {
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.mode-card-desc {
+  font-size: 0.9375rem;
+  color: var(--label);
+  line-height: 1.4;
+}
+
+.home-features {
+  margin-top: 28px;
+  padding-left: 20px;
+  color: var(--label);
+  font-size: 0.9375rem;
+  line-height: 1.8;
+}
+
+.home-footer {
+  padding: 16px;
+  padding-bottom: max(16px, var(--safe-b));
+  text-align: center;
+}
+
+.home-link {
+  font-size: 0.8125rem;
+  color: var(--label);
+  text-decoration: none;
+}
+
+/* ─── Modes (Table / Earbuds) ───────────────────────────────────────── */
+.mode-screen {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-width: 480px;
+  margin: 0 auto;
+  background: var(--bg);
+}
+
+.mode-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 16px 8px;
+  padding-top: max(12px, env(safe-area-inset-top));
+  flex-shrink: 0;
+}
+
+.back-btn {
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: 20px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+  font-size: 1.25rem;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.mode-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+
+.mode-sub {
+  font-size: 0.8125rem;
+  color: var(--label);
+  margin-top: 2px;
+}
+
+.engine-chip {
+  margin-left: auto;
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: var(--green-soft);
+  color: var(--green);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* ─── Table Mode ──────────────────────────────────────────────────── */
+.table-mode { background: #000; }
+
+.table-split {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.table-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 16px 20px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.table-pane-top {
+  background: #1c1c1e;
+  color: #f5f5f7;
+}
+
+.table-pane-bottom {
+  background: #f5f5f7;
+  color: #1c1c1e;
+}
+
+.rotate-180 { transform: rotate(180deg); }
+
+.pane-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.55;
+  margin-bottom: 8px;
+}
+
+.pane-empty {
+  font-size: 1.75rem;
+  font-weight: 300;
+  opacity: 0.35;
+}
+
+.pane-interim {
+  font-size: 1.5rem;
+  font-weight: 500;
+  opacity: 0.6;
+  font-style: italic;
+}
+
+.pane-original {
+  font-size: 1.125rem;
+  line-height: 1.35;
+  opacity: 0.7;
+  margin-bottom: 8px;
+}
+
+.pane-trans {
+  font-size: 2rem;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+.table-pane-top .pane-trans { color: #fff; }
+.table-pane-bottom .pane-trans { color: #1c1c1e; }
+
+.table-rail {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 16px;
+  background: rgba(28, 28, 30, 0.95);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.rail-status {
+  font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.table-go {
+  min-width: 120px;
+  padding: 10px 28px;
+  border: none;
+  border-radius: 20px;
+  background: var(--blue);
+  color: #fff;
+  font: inherit;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.table-go-on { background: var(--red); }
+
+.table-pane .provider-chip {
+  margin-top: 8px;
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.table-pane-bottom .provider-chip {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+/* ─── Earbud Mode ─────────────────────────────────────────────────── */
+.earbud-mode .scroll-chat { flex: 1; }
+
+.earbud-legend {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 20px 8px;
+  flex-shrink: 0;
+}
+
+.ear-tag {
+  font-size: 0.8125rem;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+
+.ear-left { color: var(--blue); }
+.ear-right { color: var(--green); }
+
 .toast {
   position: fixed;
-  bottom: calc(var(--tab-h) + 12px + var(--safe-b));
+  bottom: calc(16px + var(--safe-b));
   left: 16px;
   right: 16px;
   max-width: 448px;

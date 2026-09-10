@@ -1,81 +1,83 @@
 # Translator
 
-Real-time two-person conversation translator — a mobile-friendly PWA built with React and Vite. Built for travel: **works in Italy and the EU even when Google Translate is blocked or slow.**
+**Table Mode & Earbuds** — next-level two-person translator for travel. Built for Italy: on-device speech, multi-provider translation, no Google dependency.
 
 ## Open the app
 
 **Live:** [https://jpro99.github.io/Translator-/](https://jpro99.github.io/Translator-/)
 
-Use that URL (note `/Translator-/`). Root `https://jpro99.github.io/` is not this app.
-
 ### On your phone in Italy
 
-1. Open **Chrome** (Android) or **Safari/Chrome** (iOS — speech works best in Chrome).
-2. Go to **https://jpro99.github.io/Translator-/**
-3. Optional: **Add to Home Screen** (install PWA) for offline UI + cached assets.
-4. Tap **Talk** → **Inizia conversazione** / **Start conversation**.
-5. Allow **microphone** when prompted.
-6. Person A speaks Italian, Person B speaks English (or any pair) — translations appear automatically.
-7. Small chip shows which provider worked (e.g. `via Lingva`) so you know it's not stuck.
-8. Toggle **🔊** to hear translations (uses Italian voice when available).
+1. Open **Chrome** → **https://jpro99.github.io/Translator-/**
+2. **Add to Home Screen** (PWA) for offline UI + cached assets
+3. Choose a mode:
+   - **Table Mode** — phone face-up between two people. Split screen; top half rotated 180° so each person reads upright.
+   - **Earbuds** — one earbud each. Person A = left, Person B = right. Hear only your translation.
+4. Tap **Start** / **Inizia** → allow microphone
+5. First launch downloads on-device Whisper model (~80MB, cached). Works without Wi-Fi after that for speech.
+6. Speak — auto-detect languages, translate both ways. Chip shows provider (e.g. `via MyMemory`).
 
-If translation fails (bad network), the transcript still shows with a **Retry / Riprova** button. Retries queue automatically when you're back online.
+## Modes
 
-## What it does
+### Table Mode
+Place the phone on the table between you. Person A sits at the bottom, Person B at the top. Each side shows:
+- What was said (smaller)
+- Translation in huge type (readable from across the table)
+- Provider chip when translation succeeds
 
-- **Talk tab**: Two people speak any languages. Auto-detect each utterance, translate both ways. Person A / Person B languages learned from speech (optional overrides).
-- **Listen tab**: Overhear speech → English translation with auto-detect.
+### Earbuds
+- **Person A** wears the **left** earbud
+- **Person B** wears the **right** earbud
+- When A speaks → translation plays in B's right ear
+- When B speaks → translation plays in A's left ear
+- Stereo cue + TTS (Azure TTS if key set, else Web Speech)
 
-## Translation engine (EU-resilient)
+## Engine
 
-**No Google dependency.** Provider chain (auto-failover ~1.5s each):
+### Speech (no Google)
+1. **On-device Whisper** (WebGPU → WASM) — primary, works offline after first download
+2. **Web Speech API** — fallback if Whisper can't load
 
+### Translation (no Google primary)
+Failover chain (~1.5s each):
 1. **MyMemory** (EU-based, reliable in Italy)
-2. **Lingva** (multiple EU instances)
-3. **LibreTranslate** (public instances)
-4. **DeepL** (if `VITE_DEEPL_API_KEY` set — recommended for Italy)
-5. **Azure Translator** (if `VITE_AZURE_TRANSLATOR_KEY` set)
-6. **Google gtx** (last resort only)
+2. **Lingva** (EU mirrors)
+3. **LibreTranslate**
+4. **DeepL** (optional key)
+5. **Azure** (optional key)
+6. **Google gtx** — last resort only
 
-Recent translations cached in **IndexedDB + localStorage** for flaky networks.
+Cached in IndexedDB + localStorage. Offline: transcript shown + Retry button; auto-retry when back online.
 
-### Optional API keys (better quality)
+### Optional API keys
 
-Copy `.env.example` → `.env.local` for local dev:
+Copy `.env.example` → `.env.local`:
 
 ```bash
-VITE_DEEPL_API_KEY=your-deepl-free-key        # Best for Italian ↔ English
-VITE_AZURE_TRANSLATOR_KEY=your-azure-key
+VITE_DEEPL_API_KEY=           # Best Italian ↔ English quality
+VITE_AZURE_TRANSLATOR_KEY=    # Azure translate + stereo TTS
 VITE_AZURE_TRANSLATOR_REGION=westeurope
 ```
-
-The app works **without keys** using free public providers.
-
-## Requirements
-
-- **Browser**: Chrome or Edge (desktop or Android). Safari has limited SpeechRecognition.
-- **Microphone**: Allow when prompted. Error messages in English + Italian.
-- **Network**: Needed for translation (speech runs in-browser).
 
 ## Local dev
 
 ```bash
 npm install
-npm run dev          # http://localhost:5173
-npm run verify       # conversation + failover tests
-GITHUB_ACTIONS=true npm run build   # same as CI (base /Translator-/)
+npm run dev
+npm run verify
+GITHUB_ACTIONS=true npm run build
 ```
 
 ## Deploy
 
-Pushes to `main` deploy to GitHub Pages via `.github/workflows/deploy.yml` (~1–2 min).
+Pushes to `main` → GitHub Pages (~1–2 min).
 
-**Production URL:** https://jpro99.github.io/Translator-/
+**URL:** https://jpro99.github.io/Translator-/
 
-## Tech stack
+## Tech
 
-- React 18 + Vite 5 + PWA (service worker, manifest, icons)
-- Web Speech API + VAD hybrid (`src/speech.js`)
-- Multi-provider translation (`src/translate.js`, `src/providers.js`)
-- Two-person state machine (`src/conversation.js`)
-- Bilingual UI (`src/i18n.js`) — English + Italian
+- React 18 + Vite 5 PWA
+- Transformers.js Whisper-base (on-device STT)
+- Multi-provider translation failover
+- Web Audio stereo routing for earbuds
+- Bilingual EN/IT UI

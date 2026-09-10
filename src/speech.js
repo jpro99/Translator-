@@ -1,19 +1,8 @@
 /**
- * Hybrid speech capture — correct text WITHOUT the Android beep loop.
- *
- * Why Whisper alone failed: on-device Whisper-base mishears Tagalog badly
- * (tested: Tagalog TTS → "Thank you for watching" / garbage).
- *
- * Why Web Speech alone failed: Android ends the session every few seconds
- * even during silence, and restarting beeps every time.
- *
- * Fix used by practical mobile web apps:
- *  1) Keep a silent getUserMedia VAD running (no beeps).
- *  2) Only start Chrome SpeechRecognition when real speech is detected.
- *  3) When they pause, stop recognition and WAIT — do not restart until
- *     the next speech burst. One beep per utterance, not beep-beep-beep.
- *  4) Google’s speech engine gives real Tagalog/Spanish sentences.
+ * Speech capture: on-device Whisper (primary) → Web Speech fallback.
+ * VAD avoids Android beep loops; records PCM for Whisper.
  */
+import { resampleTo16k, whisperSupported } from './audioUtils';
 
 let gen = 0;
 let media = null;
@@ -24,16 +13,8 @@ let engineMode = null;
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const HALLUCINATION_PHRASES = [
-  'thank you for watching',
-  'thanks for watching',
-  'please subscribe',
-  'like and subscribe',
-  'subscribe to',
-  'subtitles by',
-  'amara.org',
-  'www.',
-  'http://',
-  'https://',
+  'thank you for watching', 'thanks for watching', 'please subscribe',
+  'like and subscribe', 'subscribe to', 'subtitles by', 'amara.org',
 ];
 
 function getSR() {
@@ -41,15 +22,13 @@ function getSR() {
 }
 
 export function speechSupported() {
-  return !!getSR()
-    || !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia
-      && (window.AudioContext || window.webkitAudioContext));
+  return whisperSupported() || !!getSR();
 }
 
 function teardownMedia() {
   if (!media) return;
   try { media.processor?.disconnect(); } catch {}
-  try { media.gain?.disconnect(); } catch {}
+  try { media.mute?.disconnect(); } catch {}
   try { media.analyser?.disconnect(); } catch {}
   try { media.source?.disconnect(); } catch {}
   try { if (media.processor) media.processor.onaudioprocess = null; } catch {}
@@ -66,7 +45,6 @@ function stopRecognition() {
     rec.onresult = null;
     rec.onerror = null;
     rec.onend = null;
-    rec.onstart = null;
     rec.stop();
   } catch {
     try { rec.abort(); } catch {}
@@ -115,20 +93,6 @@ export function isGarbageTranscript(text) {
     const tiny = words.filter((w) => w.length <= 1).length;
     if (tiny / words.length >= 0.5) return true;
   }
-  let run = 1;
-  for (let i = 1; i < words.length; i += 1) {
-    if (words[i] === words[i - 1]) {
-      run += 1;
-      if (run >= 3) return true;
-    } else run = 1;
-  }
-  if (words.length >= 4) {
-    const counts = Object.create(null);
-    for (const w of words) counts[w] = (counts[w] || 0) + 1;
-    if (Math.max(...Object.values(counts)) / words.length >= 0.55) return true;
-  }
-  const compact = plain.replace(/\s+/g, '');
-  if (compact.length >= 12 && new Set(compact).size / compact.length < 0.18) return true;
   return false;
 }
 
@@ -160,6 +124,7 @@ function resolveLang(getLang) {
     speechCode: v.speechCode || 'en-US',
     apiCode: v.apiCode || 'en',
     fallbackCodes: v.fallbackCodes || [],
+    whisperLang: v.whisperLang || null,
   };
 }
 
@@ -191,26 +156,48 @@ async function ensureVadMedia() {
   const analyser = ctx.createAnalyser();
   analyser.fftSize = 2048;
   analyser.smoothingTimeConstant = 0.85;
-  // Analyser only — no ScriptProcessor speaker path needed for VAD
   source.connect(analyser);
 
-  media = { stream, ctx, source, analyser };
+  const processor = ctx.createScriptProcessor(4096, 1, 1);
+  const mute = ctx.createGain();
+  mute.gain.value = 0;
+  source.connect(processor);
+  processor.connect(mute);
+  mute.connect(ctx.destination);
+
+  const recordChunks = [];
+  let recording = false;
+
+  processor.onaudioprocess = (e) => {
+    if (!recording) return;
+    recordChunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  };
+
+  media = {
+    stream,
+    ctx,
+    source,
+    analyser,
+    processor,
+    mute,
+    startRecord: () => {
+      recordChunks.length = 0;
+      recording = true;
+    },
+    stopRecord: () => {
+      recording = false;
+      return resampleTo16k(recordChunks, ctx.sampleRate);
+    },
+  };
   return media;
 }
 
-/**
- * Run one Web Speech utterance. Resolves when recognition ends.
- * Does NOT auto-restart — caller waits for next VAD trigger.
- */
 function recognizeUtterance({ lang, onInterim, onFinal, myGen }) {
   const SR = getSR();
   if (!SR) return Promise.resolve();
 
   return new Promise((resolve) => {
-    if (myGen !== gen) {
-      resolve();
-      return;
-    }
+    if (myGen !== gen) { resolve(); return; }
 
     let settled = false;
     let lastAccepted = '';
@@ -227,9 +214,7 @@ function recognizeUtterance({ lang, onInterim, onFinal, myGen }) {
     rec.lang = lang || 'en-US';
     rec.continuous = true;
     rec.interimResults = true;
-    rec.maxAlternatives = 1;
 
-    // Hard cap so a stuck session can't hold the mic forever
     const maxTimer = setTimeout(() => {
       try { rec.stop(); } catch { finish(); }
     }, 28000);
@@ -254,43 +239,29 @@ function recognizeUtterance({ lang, onInterim, onFinal, myGen }) {
       if (interim) onInterim?.(interim);
     };
 
-    rec.onerror = () => {
-      // no-speech / aborted / network → end; caller will wait for next VAD
-    };
-
+    rec.onerror = () => {};
     rec.onend = () => finish();
 
-    try {
-      rec.start();
-    } catch {
-      finish();
-    }
+    try { rec.start(); } catch { finish(); }
   });
 }
 
-/**
- * Silent VAD watches for speech. Only then start Google speech once.
- * After it ends, wait for the next speech — never restart into silence.
- */
-async function keepListeningHybrid({
-  activeRef, getLang, onInterim, onFinal, onPhase, myGen,
+async function vadLoop({
+  activeRef, getLang, onInterim, onFinal, onPhase, myGen, useWhisper, transcribeAudioFn,
 }) {
-  const SR = getSR();
-  if (!SR) {
-    onPhase?.('error');
-    return;
-  }
-
-  const { analyser } = media;
-  const levelBuf = new Uint8Array(analyser.fftSize);
-
+  const levelBuf = new Uint8Array(media.analyser.fftSize);
   const SPEECH_ON = 0.014;
   const SPEECH_OFF = 0.007;
-  const START_HOLD_MS = 180;   // need sustained voice before starting SR
+  const START_HOLD_MS = 180;
+  const END_SILENCE_MS = 700;
   const POLL_MS = 60;
+  const MAX_UTTERANCE_MS = 28000;
 
   let speechHold = 0;
+  let silenceHold = 0;
+  let inSpeech = false;
   let recognizing = false;
+  let utteranceStart = 0;
 
   onPhase?.('hearing');
   onInterim?.('');
@@ -304,6 +275,7 @@ async function keepListeningHybrid({
       forceEndCapture = false;
       stopRecognition();
       recognizing = false;
+      inSpeech = false;
       onInterim?.('');
       onPhase?.('hearing');
       await sleep(POLL_MS);
@@ -315,59 +287,83 @@ async function keepListeningHybrid({
       continue;
     }
 
-    const level = voiceLevel(analyser, levelBuf);
-    if (level >= SPEECH_ON) {
-      speechHold += POLL_MS;
-    } else if (level < SPEECH_OFF) {
-      speechHold = 0;
-    }
+    const level = voiceLevel(media.analyser, levelBuf);
 
-    if (speechHold >= START_HOLD_MS) {
-      speechHold = 0;
-      recognizing = true;
-      onPhase?.('hearing');
-      const { speechCode, fallbackCodes = [] } = resolveLang(getLang);
-      const langsToTry = [speechCode, ...fallbackCodes].filter(Boolean);
-
-      // One beep here when recognition starts — then it runs until they pause.
-      let accepted = false;
-      for (const lang of langsToTry) {
-        if (!activeRef.current || myGen !== gen || accepted) break;
-        await recognizeUtterance({
-          lang,
-        onInterim: (t) => {
-          if (activeRef.current && myGen === gen) onInterim?.(t);
-        },
-        onFinal: async (text) => {
-          if (!activeRef.current || myGen !== gen) return;
-          if (isGarbageTranscript(text)) return;
-          accepted = true;
-          onPhase?.('transcribing');
-          await onFinal?.(text);
-          if (activeRef.current && myGen === gen) onPhase?.('hearing');
-        },
-        myGen,
-        });
-        if (accepted) break;
+    if (!inSpeech) {
+      if (level >= SPEECH_ON) {
+        speechHold += POLL_MS;
+      } else if (level < SPEECH_OFF) {
+        speechHold = 0;
       }
 
-      recognizing = false;
-      onInterim?.('');
-      // Cool-down so we don't immediately re-trigger on trailing noise
-      await sleep(450);
-      if (activeRef.current && myGen === gen) onPhase?.('hearing');
-    } else {
-      await sleep(POLL_MS);
+      if (speechHold >= START_HOLD_MS) {
+        inSpeech = true;
+        silenceHold = 0;
+        utteranceStart = Date.now();
+        onPhase?.('hearing');
+        if (useWhisper) media.startRecord();
+        else {
+          recognizing = true;
+          const { speechCode, fallbackCodes = [] } = resolveLang(getLang);
+          const langs = [speechCode, ...fallbackCodes].filter(Boolean);
+          let accepted = false;
+          for (const lang of langs) {
+            if (!activeRef.current || myGen !== gen || accepted) break;
+            await recognizeUtterance({
+              lang,
+              onInterim: (t) => { if (activeRef.current && myGen === gen) onInterim?.(t); },
+              onFinal: async (text) => {
+                if (!activeRef.current || myGen !== gen || isGarbageTranscript(text)) return;
+                accepted = true;
+                onPhase?.('transcribing');
+                await onFinal?.(text);
+                if (activeRef.current && myGen === gen) onPhase?.('hearing');
+              },
+              myGen,
+            });
+            if (accepted) break;
+          }
+          recognizing = false;
+          inSpeech = false;
+          onInterim?.('');
+          await sleep(450);
+        }
+      }
+    } else if (useWhisper) {
+      if (level < SPEECH_OFF) {
+        silenceHold += POLL_MS;
+      } else {
+        silenceHold = 0;
+        onInterim?.('…');
+      }
+
+      const timedOut = Date.now() - utteranceStart > MAX_UTTERANCE_MS;
+      if (silenceHold >= END_SILENCE_MS || timedOut) {
+        inSpeech = false;
+        onPhase?.('transcribing');
+        const pcm = media.stopRecord();
+        if (pcm.length > 8000) {
+          try {
+            const { whisperLang } = resolveLang(getLang);
+            const text = await transcribeAudioFn?.(pcm, { language: whisperLang || 'auto' });
+            if (text && !isGarbageTranscript(text) && activeRef.current && myGen === gen) {
+              await onFinal?.(text);
+            }
+          } catch {}
+        }
+        onInterim?.('');
+        onPhase?.('hearing');
+        await sleep(450);
+      }
     }
+
+    await sleep(POLL_MS);
   }
 
   stopRecognition();
   onInterim?.('');
 }
 
-/**
- * Always-on listen until Stop.
- */
 export async function keepListening({
   activeRef,
   getLang,
@@ -379,7 +375,7 @@ export async function keepListening({
   onEngine,
 }) {
   if (!speechSupported()) {
-    onError?.('This browser can’t access the microphone. Use Chrome.');
+    onError?.('no-mic');
     return;
   }
 
@@ -387,24 +383,34 @@ export async function keepListening({
   forceEndCapture = false;
   engineMode = null;
 
-  if (!getSR()) {
-    onError?.('Speech recognition needs Chrome or Edge.');
-    activeRef.current = false;
-    return;
-  }
-
   try {
     await ensureVadMedia();
   } catch {
-    onError?.('Microphone access denied — allow it in browser settings.');
+    onError?.('mic-denied');
     activeRef.current = false;
     return;
   }
 
-  // Ready immediately — no huge model download
-  engineMode = 'hybrid';
-  onEngine?.('hybrid');
-  onModel?.({ status: 'ready', progress: 100 });
+  let useWhisper = false;
+  let transcribeAudio;
+  try {
+    const whisper = await import('./whisper');
+    await whisper.loadWhisper((info) => onModel?.(info));
+    transcribeAudio = whisper.transcribeAudio;
+    useWhisper = true;
+    engineMode = 'whisper';
+    onEngine?.('whisper');
+  } catch {
+    if (!getSR()) {
+      onError?.('no-speech');
+      activeRef.current = false;
+      teardownMedia();
+      return;
+    }
+    engineMode = 'webspeech';
+    onEngine?.('webspeech');
+    onModel?.({ status: 'ready', progress: 100, device: 'webspeech' });
+  }
 
   if (!activeRef.current || myGen !== gen) {
     teardownMedia();
@@ -412,8 +418,9 @@ export async function keepListening({
   }
 
   try {
-    await keepListeningHybrid({
-      activeRef, getLang, onInterim, onFinal, onPhase, myGen,
+    await vadLoop({
+      activeRef, getLang, onInterim, onFinal, onPhase, myGen, useWhisper,
+      transcribeAudioFn: transcribeAudio,
     });
   } finally {
     if (myGen === gen) {
